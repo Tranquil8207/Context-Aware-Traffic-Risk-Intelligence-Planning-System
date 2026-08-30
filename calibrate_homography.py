@@ -40,7 +40,7 @@ import numpy as np
 
 from calibration_io import CALIBRATION_PATH, update_calibration
 
-DEFAULT_VIDEO_PATH = "YTDown.com_YouTube_Indian-Traffic-Vehicles-Highway-Footage-_Media_tQnVX3nj3Co_002_720p (1).mp4"
+DEFAULT_VIDEO_PATH = "istockphoto-1282097660-640_adpp_is.mp4"
 
 # Fallback real-world measurements if not overridden on the command line.
 # Must match LANE_WIDTH_M / REFERENCE_DISTANCE_M in objectdetection.py.

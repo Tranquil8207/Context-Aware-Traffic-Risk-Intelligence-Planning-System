@@ -20,15 +20,14 @@ YOLOP_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "YOLOP")
 if YOLOP_ROOT not in sys.path:
     sys.path.append(YOLOP_ROOT)
 
-from lib.config import cfg  # noqa: E402
-from lib.models import get_net  # noqa: E402
+
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-VIDEO_PATH = "YTDown.com_YouTube_Indian-Traffic-Vehicles-Highway-Footage-_Media_tQnVX3nj3Co_002_720p (1).mp4"
+VIDEO_PATH = "istockphoto-1282097660-640_adpp_is.mp4"
 
 # Your existing object detector
 OBJECT_MODEL_PATH = "yolo26m.pt"
@@ -1127,28 +1126,7 @@ def main():
             "calibration.json."
         )
 
-    # --------------------------------------------------------
-    # YOLOP
-    # --------------------------------------------------------
-
-    if not os.path.exists(
-        LANE_MODEL_PATH
-    ):
-
-        raise FileNotFoundError(
-            "\nYOLOP weights not found:\n"
-            f"{LANE_MODEL_PATH}\n\n"
-            "Download the official End-to-end.pth "
-            "weights from the YOLOP repository."
-        )
-
-    lane_model = YOLOPLaneDetector(
-        LANE_MODEL_PATH,
-        device="cuda"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
-
+    
     # --------------------------------------------------------
     # VIDEO OUTPUT
     # --------------------------------------------------------
@@ -1200,37 +1178,7 @@ def main():
             timestamp_s * 1000
         )
 
-        # ====================================================
-        # LANE SEGMENTATION
-        # ====================================================
-
-        lane_mask = (
-            lane_model
-            .detect_lane_mask(
-                frame
-            )
-        )
-
-        lane_mask = clean_lane_mask(
-            lane_mask
-        )
-
-        lane_points = (
-            extract_lane_points(
-                lane_mask
-            )
-        )
-
-        # Draw lane segmentation
-        frame = draw_lane_mask(
-            frame,
-            lane_mask
-        )
-
-        frame = draw_lane_points(
-            frame,
-            lane_points
-        )
+        
 
         frame = draw_lane_polygons(
             frame,
