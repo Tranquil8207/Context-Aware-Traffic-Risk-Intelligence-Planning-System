@@ -6,9 +6,7 @@ python-multipart>=0.0.12
 supabase>=2.9.0
 python-dotenv>=1.0.0
 
-# Required by the vendored YOLOP/ lane-detection repo (objectdetection.py
-# imports torch/torchvision/numpy directly, and YOLOP's lib.config needs yacs)
-torch>=2.0.0
-torchvision>=0.15.0
+# objectdetection.py uses numpy directly for homography/velocity math.
+# torch/torchvision/yacs were only needed for the now-removed YOLOP lane
+# segmentation (superseded by manual lane boxing in calibrate_lanes.py).
 numpy>=1.24.0
-yacs>=0.1.8

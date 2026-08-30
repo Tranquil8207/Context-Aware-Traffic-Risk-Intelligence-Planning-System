@@ -60,10 +60,12 @@
     riskMetrics: null,
     riskMetricsReq: 0,
     riskSkTimer: null,
+    popup: null,
+    popupCanvas: null,
   };
 
   const canvas = $("calibCanvas");
-  const ctx = canvas.getContext("2d");
+  let ctx = canvas.getContext("2d");
 
   function log(message) {
     const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
@@ -138,8 +140,13 @@
     $("nextFrameBtn").disabled = !showCanvas;
     if (!showCanvas) $("viewHud").textContent = "";
     if (showCanvas && state.selectedId) loadFrame(state.frameIndex);
-    if (stage === "homography") renderHomoTable();
-    if (stage === "lanes") renderLaneTable();
+    if (stage === "homography" || stage === "lanes") {
+      openCalibPopup();
+      renderHomoTable();
+      if (stage === "lanes") renderLaneTable();
+    } else {
+      closeCalibPopup();
+    }
     if (stage === "events") {
       fillEventForm(state.record);
       loadIncidents();
@@ -198,6 +205,7 @@
     state.pendingPolygon = null;
     state.currentArrow = [];
     setPreviewFile(null);
+    closeCalibPopup();
     resetRiskForm();
     unlockLaterSteps(null);
     setStage("ingest");
@@ -355,6 +363,137 @@
     xhr.send(collectIngest());
   }
 
+  function calibCanvases() {
+    const list = [canvas];
+    if (state.popupCanvas && state.popup && !state.popup.closed) list.push(state.popupCanvas);
+    return list;
+  }
+
+  function setHud(text) {
+    $("viewHud").textContent = text;
+    if (state.popup && !state.popup.closed) {
+      const hud = state.popup.document.getElementById("hud");
+      if (hud) hud.textContent = text;
+    }
+  }
+
+  function syncPopupChrome() {
+    const open = Boolean(state.popup && !state.popup.closed);
+    $("openFrameBtn").hidden = !((state.stage === "homography" || state.stage === "lanes") && !open);
+    if (!open) return;
+    const title = state.popup.document.getElementById("title");
+    const hint = state.popup.document.getElementById("hint");
+    const frame = state.popup.document.getElementById("frame");
+    if (title) {
+      title.textContent = state.stage === "lanes"
+        ? "Lane boxing"
+        : "Homography — near-left, near-right, far-left, far-right";
+    }
+    if (hint) {
+      hint.textContent = state.stage === "lanes"
+        ? "click=add point  u=undo  Enter/c=finish/skip heading  z=undo lane  r=reset  n/p=frame"
+        : "click=add point  r=reset  n/p=frame  q=close window";
+    }
+    if (frame) {
+      frame.textContent = `frame ${state.frameIndex} / ${Math.max(state.frameCount - 1, 0)}`;
+    }
+    state.popup.document.title = state.stage === "lanes" ? "catris — lanes" : "catris — homography";
+  }
+
+  function closeCalibPopup() {
+    if (state.popup && !state.popup.closed) {
+      try { state.popup.close(); } catch { /* ignore */ }
+    }
+    state.popup = null;
+    state.popupCanvas = null;
+    $("openFrameBtn").hidden = true;
+  }
+
+  function openCalibPopup() {
+    if (state.stage !== "homography" && state.stage !== "lanes") return;
+    if (state.popup && !state.popup.closed) {
+      try { state.popup.focus(); } catch { /* ignore */ }
+      syncPopupChrome();
+      draw();
+      return;
+    }
+    const imgW = state.frameImage ? state.frameImage.width : (state.frameWidth || 1280);
+    const imgH = state.frameImage ? state.frameImage.height : (state.frameHeight || 720);
+    const w = Math.min(screen.availWidth - 24, Math.max(960, imgW + 24));
+    const h = Math.min(screen.availHeight - 48, Math.max(640, imgH + 100));
+    const win = window.open(
+      "",
+      "catrisCalib",
+      `popup=yes,width=${w},height=${h},left=40,top=40,menubar=no,toolbar=no,location=no,status=no`,
+    );
+    if (!win) {
+      $("openFrameBtn").hidden = false;
+      log("Frame window blocked — click Open frame window (allow popups for this site).");
+      return;
+    }
+    state.popup = win;
+    win.document.open();
+    win.document.write(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>catris — calibration</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0a0a; color: #f8f8ff;
+    font: 12px/1.35 "Segoe UI", Tahoma, sans-serif; }
+  .wrap { height: 100%; display: grid; grid-template-rows: 32px minmax(0,1fr) 28px; }
+  .bar { display: flex; align-items: center; gap: 10px; padding: 0 10px;
+    background: linear-gradient(#323232, #242424); border-bottom: 1px solid #111; user-select: none; }
+  .bar.bottom { border-bottom: 0; border-top: 1px solid #111; color: #b8b8b8; }
+  #title { color: #ffefd5; font-weight: 700; }
+  #hud { color: #f0e68c; }
+  .stage { min-height: 0; display: grid; place-items: center; overflow: auto; background: #000; }
+  canvas { cursor: crosshair; display: block; max-width: 100%; max-height: 100%;
+    width: auto; height: auto; object-fit: contain; }
+  button { color: #fff8dc; background: linear-gradient(#101010, #202020 50%, #101010);
+    border: 1px solid #2e2e2e; border-radius: 6px; padding: 3px 10px; }
+  button:hover { border-color: #bdb76b; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span id="title">Calibration</span>
+    <span id="hud"></span>
+    <span style="margin-left:auto" id="frame">frame 0 / 0</span>
+    <button type="button" id="prev">Prev frame</button>
+    <button type="button" id="next">Next frame</button>
+  </div>
+  <div class="stage"><canvas id="c"></canvas></div>
+  <div class="bar bottom" id="hint">click=add point</div>
+</div>
+</body>
+</html>`);
+    win.document.close();
+    const pc = win.document.getElementById("c");
+    state.popupCanvas = pc;
+    pc.addEventListener("click", onCanvasClick);
+    win.document.getElementById("prev").addEventListener("click", () => {
+      if (state.frameIndex > 0) loadFrame(state.frameIndex - 1);
+    });
+    win.document.getElementById("next").addEventListener("click", () => {
+      if (state.frameIndex + 1 < state.frameCount) loadFrame(state.frameIndex + 1);
+    });
+    win.addEventListener("keydown", handleCalibKeys);
+    win.addEventListener("unload", () => {
+      if (state.popup === win) {
+        state.popup = null;
+        state.popupCanvas = null;
+        if (state.stage === "homography" || state.stage === "lanes") {
+          $("openFrameBtn").hidden = false;
+        }
+      }
+    });
+    syncPopupChrome();
+    draw();
+    try { win.focus(); } catch { /* ignore */ }
+  }
+
   async function loadFrame(index) {
     if (!state.selectedId) return;
     const res = await fetch(`/api/sources/${encodeURIComponent(state.selectedId)}/frame?index=${index}`);
@@ -373,32 +512,46 @@
     img.onload = () => {
       URL.revokeObjectURL(url);
       state.frameImage = img;
-      canvas.width = img.width;
-      canvas.height = img.height;
+      calibCanvases().forEach((c) => {
+        c.width = img.width;
+        c.height = img.height;
+      });
+      syncPopupChrome();
       draw();
     };
     img.src = url;
   }
 
   function canvasPoint(ev) {
-    const rect = canvas.getBoundingClientRect();
+    const c = ev.currentTarget || canvas;
+    const rect = c.getBoundingClientRect();
     return {
-      x: Math.round((ev.clientX - rect.left) * (canvas.width / rect.width)),
-      y: Math.round((ev.clientY - rect.top) * (canvas.height / rect.height)),
+      x: Math.round((ev.clientX - rect.left) * (c.width / rect.width)),
+      y: Math.round((ev.clientY - rect.top) * (c.height / rect.height)),
     };
   }
 
   function draw() {
     if (!state.frameImage) return;
-    ctx.drawImage(state.frameImage, 0, 0);
-    if (state.stage === "homography") drawHomography();
-    if (state.stage === "lanes" || state.stage === "events" || state.stage === "risk") drawLanes();
+    const saved = ctx;
+    calibCanvases().forEach((c) => {
+      if (c.width !== state.frameImage.width || c.height !== state.frameImage.height) {
+        c.width = state.frameImage.width;
+        c.height = state.frameImage.height;
+      }
+      ctx = c.getContext("2d");
+      ctx.drawImage(state.frameImage, 0, 0);
+      if (state.stage === "homography") drawHomography();
+      if (state.stage === "lanes" || state.stage === "events" || state.stage === "risk") drawLanes();
+    });
+    ctx = saved;
     if (state.stage === "events") {
-      $("viewHud").textContent = "Lanes frozen — edit event thresholds below, then run identification.";
+      setHud("Lanes frozen — edit event thresholds below, then run identification.");
     }
     if (state.stage === "risk") {
-      $("viewHud").textContent = "Lanes frozen — set s_k and blend weights, then Compute Risk.";
+      setHud("Lanes frozen — set s_k and blend weights, then Save.");
     }
+    syncPopupChrome();
   }
 
   function drawHomography() {
@@ -429,7 +582,7 @@
     const prompt = pts.length < 4
       ? `Click ${HOMO_LABELS[pts.length]} (${pts.length}/4)`
       : "4/4 selected. Enter LANE_WIDTH_M and REFERENCE_DISTANCE_M, then Save Homography.";
-    $("viewHud").textContent = prompt;
+    setHud(prompt);
   }
 
   function drawPoly(points, color, closed) {
@@ -498,10 +651,10 @@
       drawPoly(state.currentPolygon, LANE_COLORS[state.finishedLanes.length % LANE_COLORS.length], false);
     }
     if (state.pendingPolygon) {
-      $("viewHud").textContent = `Click direction arrow: ${state.currentArrow.length}/2 points`;
+      setHud(`Click direction arrow: ${state.currentArrow.length}/2 points`);
       $("laneStatus").textContent = `Lane ${state.finishedLanes.length + 1} boundary done — click travel start, then end (or Enter to skip heading)`;
     } else {
-      $("viewHud").textContent = `Current lane points: ${state.currentPolygon.length}`;
+      setHud(`Current lane points: ${state.currentPolygon.length}`);
       $("laneStatus").textContent = `Lanes finished: ${state.finishedLanes.length}   Current lane points: ${state.currentPolygon.length}`;
     }
   }
@@ -528,7 +681,7 @@
   }
 
   function onCanvasClick(ev) {
-    if (canvas.hidden) return;
+    if (state.stage !== "homography" && state.stage !== "lanes") return;
     const pt = canvasPoint(ev);
     if (state.stage === "homography") {
       if (state.homoPoints.length >= 4) return;
@@ -1187,6 +1340,10 @@
   });
 
   canvas.addEventListener("click", onCanvasClick);
+  $("openFrameBtn").addEventListener("click", () => openCalibPopup());
+  document.querySelectorAll("[data-open-frame]").forEach((el) => {
+    el.addEventListener("click", () => openCalibPopup());
+  });
   $("resetHomoBtn").addEventListener("click", resetHomo);
   $("saveHomoBtn").addEventListener("click", () => saveHomography().catch((err) => log(String(err))));
   $("undoPointBtn").addEventListener("click", undoPoint);
@@ -1214,6 +1371,32 @@
     if (state.frameIndex + 1 < state.frameCount) loadFrame(state.frameIndex + 1);
   });
 
+  function handleCalibKeys(ev) {
+    if (ev.target && (ev.target.tagName === "INPUT" || ev.target.tagName === "SELECT" || ev.target.tagName === "TEXTAREA")) return;
+    if (state.stage !== "homography" && state.stage !== "lanes") return;
+    if (ev.key === "n") {
+      ev.preventDefault();
+      if (state.frameIndex + 1 < state.frameCount) loadFrame(state.frameIndex + 1);
+    }
+    if (ev.key === "p") {
+      ev.preventDefault();
+      if (state.frameIndex > 0) loadFrame(state.frameIndex - 1);
+    }
+    if (ev.key === "r") {
+      ev.preventDefault();
+      if (state.stage === "homography") resetHomo();
+      else resetCurrentLane();
+    }
+    if (ev.key === "q" || ev.key === "Escape") {
+      if (state.popup && !state.popup.closed) closeCalibPopup();
+    }
+    if (state.stage === "lanes") {
+      if (ev.key === "u") { ev.preventDefault(); undoPoint(); }
+      if (ev.key === "z") { ev.preventDefault(); undoLane(); }
+      if (ev.key === "Enter" || ev.key === "c") { ev.preventDefault(); finishCurrentLane(); }
+    }
+  }
+
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") {
       closeMenus();
@@ -1232,26 +1415,7 @@
       ingestSource();
     }
     if (typing()) return;
-    if (state.stage === "ingest") return;
-    if (ev.key === "n") {
-      ev.preventDefault();
-      if (state.frameIndex + 1 < state.frameCount) loadFrame(state.frameIndex + 1);
-    }
-    if (ev.key === "p") {
-      ev.preventDefault();
-      if (state.frameIndex > 0) loadFrame(state.frameIndex - 1);
-    }
-    if (state.stage === "events" || state.stage === "risk") return;
-    if (ev.key === "r") {
-      ev.preventDefault();
-      if (state.stage === "homography") resetHomo();
-      else resetCurrentLane();
-    }
-    if (state.stage === "lanes") {
-      if (ev.key === "u") { ev.preventDefault(); undoPoint(); }
-      if (ev.key === "z") { ev.preventDefault(); undoLane(); }
-      if (ev.key === "Enter" || ev.key === "c") { ev.preventDefault(); finishCurrentLane(); }
-    }
+    handleCalibKeys(ev);
   });
 
   log("catris v0.1 — ingest → homography → lanes → events → risk.");

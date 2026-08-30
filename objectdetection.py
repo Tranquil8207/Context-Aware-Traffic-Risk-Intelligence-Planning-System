@@ -6,23 +6,11 @@ from collections import deque
 
 import cv2
 import numpy as np
-import torch
-import torchvision.transforms as transforms
 from supabase import Client
 from ultralytics import YOLO
 
 from source_io import merge_events, resolve_source, video_file_for
 from supabase_client import get_client
-
-# The YOLOP repo has no top-level `YOLOP` package to import from — its
-# importable code lives under lib/. Add the cloned repo folder to sys.path
-# so `lib` resolves, matching the repo's own tools/demo.py.
-YOLOP_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "YOLOP")
-if YOLOP_ROOT not in sys.path:
-    sys.path.append(YOLOP_ROOT)
-
-from lib.config import cfg  # noqa: E402
-from lib.models import get_net  # noqa: E402
 
 
 # ============================================================
@@ -35,7 +23,6 @@ from lib.models import get_net  # noqa: E402
 # not per-clip inputs.
 
 OBJECT_MODEL_PATH = "yolo26m.pt"
-LANE_MODEL_PATH = "YOLOP/weights/End-to-end.pth"
 
 CONFIDENCE = None
 SPEED_SMOOTHING_FRAMES = None
@@ -169,99 +156,6 @@ HOMOGRAPHY = None
 
 
 # ============================================================
-# YOLOP LANE MODEL
-# ============================================================
-
-class YOLOPLaneDetector:
-
-    def __init__(self, weights_path, device="cpu"):
-
-        self.device = torch.device(device)
-
-        print("\nLoading YOLOP lane model...")
-
-        self.model = get_net(cfg)
-
-        checkpoint = torch.load(
-            weights_path,
-            map_location=self.device
-        )
-
-        self.model.load_state_dict(
-            checkpoint["state_dict"]
-        )
-
-        self.model = self.model.to(self.device)
-        self.model.eval()
-
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
-        ])
-
-        print("YOLOP loaded.")
-
-    def preprocess(self, frame):
-
-        # YOLOP expects 640x640
-        img = cv2.resize(
-            frame,
-            (640, 640)
-        )
-
-        img_rgb = cv2.cvtColor(
-            img,
-            cv2.COLOR_BGR2RGB
-        )
-
-        tensor = self.transform(img_rgb)
-
-        tensor = tensor.unsqueeze(0)
-
-        tensor = tensor.to(self.device)
-
-        return tensor
-
-    def detect_lane_mask(self, frame):
-
-        original_h, original_w = frame.shape[:2]
-
-        tensor = self.preprocess(frame)
-
-        with torch.no_grad():
-
-            _, _, lane_output = self.model(
-                tensor
-            )
-
-        # YOLOP lane segmentation
-        lane_output = torch.nn.functional.interpolate(
-            lane_output,
-            size=(original_h, original_w),
-            mode="bilinear",
-            align_corners=False
-        )
-
-        lane_mask = torch.argmax(
-            lane_output,
-            dim=1
-        )
-
-        lane_mask = (
-            lane_mask
-            .squeeze()
-            .cpu()
-            .numpy()
-            .astype(np.uint8)
-        )
-
-        return lane_mask
-
-
-# ============================================================
 # HOMOGRAPHY
 # ============================================================
 
@@ -371,156 +265,8 @@ def get_lane_number(x, y):
 
 
 # ============================================================
-# LANE PROCESSING
+# LANE PROCESSING (manual boxing, from calibrate_lanes.py)
 # ============================================================
-
-def clean_lane_mask(mask):
-
-    binary = np.where(
-        mask > 0,
-        255,
-        0
-    ).astype(np.uint8)
-
-    kernel = np.ones(
-        (5, 5),
-        np.uint8
-    )
-
-    binary = cv2.morphologyEx(
-        binary,
-        cv2.MORPH_OPEN,
-        kernel
-    )
-
-    binary = cv2.morphologyEx(
-        binary,
-        cv2.MORPH_CLOSE,
-        kernel
-    )
-
-    return binary
-
-
-def draw_lane_mask(frame, mask):
-
-    overlay = frame.copy()
-
-    lane_pixels = mask > 0
-
-    # Green lane visualization
-    overlay[lane_pixels] = (
-        0.5 * overlay[lane_pixels] +
-        0.5 * np.array(
-            [0, 255, 255]
-        )
-    ).astype(np.uint8)
-
-    return cv2.addWeighted(
-        frame,
-        0.7,
-        overlay,
-        0.3,
-        0
-    )
-
-
-# ============================================================
-# LANE CURVE EXTRACTION
-# ============================================================
-
-def extract_lane_points(mask):
-
-    """
-    Extract center points of detected lane markings
-    row-by-row.
-
-    Returns:
-        [(x, y), ...]
-    """
-
-    points = []
-
-    h, w = mask.shape
-
-    # Focus on road region
-    start_y = int(h * 0.40)
-
-    for y in range(
-        start_y,
-        h,
-        5
-    ):
-
-        xs = np.where(
-            mask[y] > 0
-        )[0]
-
-        if len(xs) == 0:
-            continue
-
-        # Group contiguous lane pixels
-        groups = []
-
-        current = [
-            xs[0]
-        ]
-
-        for i in range(
-            1,
-            len(xs)
-        ):
-
-            if xs[i] - xs[i - 1] <= 3:
-                current.append(
-                    xs[i]
-                )
-            else:
-
-                if len(current) >= 2:
-                    groups.append(
-                        current
-                    )
-
-                current = [
-                    xs[i]
-                ]
-
-        if len(current) >= 2:
-            groups.append(
-                current
-            )
-
-        for group in groups:
-
-            x_center = int(
-                np.mean(group)
-            )
-
-            points.append(
-                (x_center, y)
-            )
-
-    return points
-
-
-def draw_lane_points(
-    frame,
-    lane_points
-):
-
-    for x, y in lane_points:
-
-        cv2.circle(
-            frame,
-            (x, y),
-            2,
-            (255, 255, 0),
-            -1
-        )
-
-    return frame
-
 
 LANE_POLYGON_COLORS = [
     (255, 0, 0),
@@ -1730,7 +1476,7 @@ def main():
 
             frame,
 
-            "YOLO + ByteTrack + YOLOP",
+            "YOLO + ByteTrack",
 
             (20, 30),
 

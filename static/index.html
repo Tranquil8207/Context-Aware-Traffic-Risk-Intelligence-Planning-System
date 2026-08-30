@@ -95,6 +95,7 @@
             <div class="empty-hint">File → Open Video…  or drop an .mp4 here</div>
           </div>
           <div class="view-hud" id="viewHud"></div>
+          <button type="button" id="openFrameBtn" hidden>Open frame window</button>
         </div>
 
         <div class="step-panel" id="panelIngest">
@@ -227,6 +228,7 @@
                 <p class="why">Real distance between the near line and the far line.</p>
                 <p class="keys">click=add point · r=reset · n/p=frame · frame <span id="frameLabel">0 / 0</span></p>
                 <div class="form-actions">
+                  <button type="button" class="open-frame-btn" data-open-frame>Open frame window</button>
                   <button type="button" id="resetHomoBtn">Reset points</button>
                   <button type="button" class="primary" id="saveHomoBtn">Save Homography</button>
                 </div>
@@ -252,6 +254,7 @@
                 <p class="keys" id="laneStatus">Current lane points: 0</p>
                 <p class="keys">click=add · u=undo point · Enter=finish/skip heading · z=undo lane · r=reset current · n/p=frame</p>
                 <div class="form-actions">
+                  <button type="button" class="open-frame-btn" data-open-frame>Open frame window</button>
                   <button type="button" id="undoPointBtn">Undo point</button>
                   <button type="button" id="finishLaneBtn">Finish boundary</button>
                   <button type="button" id="undoLaneBtn">Undo lane</button>
