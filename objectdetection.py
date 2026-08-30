@@ -530,41 +530,57 @@ def draw_lane_polygons(frame, lane_polygons):
 # VELOCITY
 # ============================================================
 
+MAX_REASONABLE_SPEED_MPS = MAX_REASONABLE_SPEED_KMH / 3.6
+
+
+def is_plausible_world_step(history, t, x, y):
+    """Reject a position sample before it enters world_history, rather than
+    only rejecting the speed computed from it afterward -- otherwise a
+    single bad sample (detector glitch, homography extrapolation spike)
+    keeps contaminating the velocity fit for as long as it stays in the
+    window, not just the one frame it occurred on."""
+
+    if not history:
+        return True
+
+    last_t, last_x, last_y = history[-1]
+    dt = t - last_t
+
+    if dt <= 0:
+        return False
+
+    dx = x - last_x
+    dy = y - last_y
+
+    return math.sqrt(dx * dx + dy * dy) / dt <= MAX_REASONABLE_SPEED_MPS
+
+
 def calculate_velocity(
     track,
     current_time_s
 ):
 
+    # A 2-point frame-to-frame difference amplifies any pixel/homography
+    # jitter into velocity noise -- fitting a line through the whole
+    # recent window (world_history holds up to 20 samples) and taking its
+    # slope is far more stable, and degrades gracefully to the old 2-point
+    # behavior when a track only has 2 samples so far.
     history = track["world_history"]
 
     if len(history) < 2:
         return 0.0, 0.0, 0.0
 
-    previous = history[-2]
+    times = np.array([sample[0] for sample in history])
 
-    current = history[-1]
-
-    dt = (
-        current[0]
-        - previous[0]
-    )
-
-    if dt <= 0:
+    if times[-1] - times[0] <= 0:
         return 0.0, 0.0, 0.0
 
-    dx = (
-        current[1]
-        - previous[1]
-    )
+    xs = np.array([sample[1] for sample in history])
+    ys = np.array([sample[2] for sample in history])
 
-    dy = (
-        current[2]
-        - previous[2]
-    )
+    vx = np.polyfit(times, xs, 1)[0]
 
-    vx = dx / dt
-
-    vy = dy / dt
+    vy = np.polyfit(times, ys, 1)[0]
 
     speed = math.sqrt(
         vx * vx +
@@ -1197,6 +1213,15 @@ def main():
 
                     Y is not None
 
+                    and
+
+                    is_plausible_world_step(
+                        track["world_history"],
+                        timestamp_s,
+                        X,
+                        Y
+                    )
+
                 ):
 
                     track[
@@ -1230,13 +1255,16 @@ def main():
 
                 else:
 
-                    speed_mps = 0.0
+                    # Missing coordinates or a rejected implausible jump --
+                    # hold the track's last known smoothed values (0.0 for
+                    # a brand new track) rather than flashing 0 on-screen.
+                    speed_mps = track["speed_mps"]
 
-                    speed_kmh = 0.0
+                    speed_kmh = track["speed_kmh"]
 
-                    vx = 0.0
+                    vx = track["vx"]
 
-                    vy = 0.0
+                    vy = track["vy"]
 
                 # ====================================================
                 # DRAW BOUNDING BOX
