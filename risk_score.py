@@ -108,7 +108,8 @@ def compute_metrics(
     n_inferred = sum(inferred_counts.get(k, 0.0) for k in INFERRED_TYPES)
     P = n_inferred / T
 
-    # Step 6 -- E (distinct tracked vehicles / minute)
+    # Step 6 -- E (distinct tracked vehicles / second). duration_s is already
+    # wall-clock seconds from the clip; do not convert it again.
     tracks_response = (
         client.table("tracked_objects")
         .select("track_id")
@@ -117,7 +118,8 @@ def compute_metrics(
         .execute()
     )
     vehicle_count = len({row["track_id"] for row in tracks_response.data})
-    E = vehicle_count / T
+    T_s = max(float(duration_s), 1.0)
+    E = vehicle_count / T_s
 
     # Step 7 -- C (place multipliers)
     C = 1.0
