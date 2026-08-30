@@ -1,13 +1,26 @@
-import os
-import cv2
 import math
-import numpy as np
+import os
+import sys
 from collections import deque
 
+import cv2
+import numpy as np
+import torch
+import torchvision.transforms as transforms
 from supabase import Client
 from ultralytics import YOLO
 
 from supabase_client import get_client
+
+# The YOLOP repo has no top-level `YOLOP` package to import from — its
+# importable code lives under lib/. Add the cloned repo folder to sys.path
+# so `lib` resolves, matching the repo's own tools/demo.py.
+YOLOP_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "YOLOP")
+if YOLOP_ROOT not in sys.path:
+    sys.path.append(YOLOP_ROOT)
+
+from lib.config import cfg  # noqa: E402
+from lib.models import get_net  # noqa: E402
 
 
 # ============================================================
@@ -88,27 +101,6 @@ CLASS_MAP = {
 # ============================================================
 
 HOMOGRAPHY = None
-
-
-# ============================================================
-# YOLOP IMPORTS
-# ============================================================
-
-import sys
-
-YOLOP_ROOT = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "YOLOP"
-)
-
-if YOLOP_ROOT not in sys.path:
-    sys.path.append(YOLOP_ROOT)
-
-import torch
-import torchvision.transforms as transforms
-
-from YOLOP import cfg
-from YOLOP import get_net
 
 
 # ============================================================
@@ -210,7 +202,7 @@ class YOLOPLaneDetector:
 
 def create_homography(width, height):
 
-    """
+    r"""
     Manual calibration.
 
     IMPORTANT:
