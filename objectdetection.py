@@ -55,10 +55,10 @@ _CALIBRATION = load_calibration()
 _HOMOGRAPHY_CAL = _CALIBRATION.get("homography", {})
 
 HOMOGRAPHY_SRC = _HOMOGRAPHY_CAL.get("src", [
-    [142, 431],   # near-left
-    [697, 431],   # near-right
-    [294, 163],   # far-left
-    [438, 163],   # far-right
+    [6, 527],     # near-left
+    [856, 522],   # near-right
+    [385, 39],    # far-left
+    [594, 40],    # far-right
 ])
 
 LANE_WIDTH_M = _HOMOGRAPHY_CAL.get("lane_width_m", 10.5)
@@ -75,12 +75,33 @@ SINGLE_LANE_WIDTH_M = LANE_WIDTH_M / NUM_LANES
 CAMERA_HEIGHT_M = 8.0
 
 # Used for homography calibration.
-REFERENCE_DISTANCE_M = _HOMOGRAPHY_CAL.get("reference_distance_m", 120.0)
+REFERENCE_DISTANCE_M = _HOMOGRAPHY_CAL.get("reference_distance_m", 147.0)
 
-SPEED_SMOOTHING_FRAMES = 5
+SPEED_SMOOTHING_FRAMES = 10
 
 # Reject physically impossible instantaneous speeds
 MAX_REASONABLE_SPEED_KMH = 180.0
+
+# ------------------------------------------------------------
+# EVENT DETECTION (Stage 2 locked list, no lane_cut/red_light this pass)
+# ------------------------------------------------------------
+
+WRONG_WAY_ANGLE_DEG = 150.0
+WRONG_WAY_DWELL_S = 4.0
+
+# yours to set per place; each stays disabled (never fires) until set
+V_MIN_KMH = None
+SPEEDING_OVER_WINDOW_S = 0.5
+SPEEDING_UNDER_WINDOW_S = 1.0
+
+HARSH_BRAKE_DROP_KMH = 10.0
+HARSH_BRAKE_WINDOW_S = 1.0
+
+NEAR_MISS_GAP_M = 2.0
+NEAR_MISS_MIN_FRAMES = 3  # must exceed this, i.e. >=4 consecutive frames
+
+WEAVE_VLAT_LIM_KMH = 6.0
+WEAVE_WINDOW_FRAMES = 5
 
 # ------------------------------------------------------------
 # Road metadata
@@ -91,7 +112,7 @@ LNG = None
 
 ROAD_KIND = "expressway"
 
-SPEED_LIMIT_KMH = None
+SPEED_LIMIT_KMH = 80
 
 REF_LENGTH_M = SINGLE_LANE_WIDTH_M
 
@@ -105,9 +126,12 @@ LEGAL_HEADING = None
 # Loaded from calibration.json's "lanes" section if present (written by
 # calibrate_lanes.py); falls back to the last known-good boxing otherwise.
 LANES = _CALIBRATION.get("lanes", [
-    {"lane": 1, "polygon": [[150, 431], [334, 431], [346, 126], [314, 127], [150, 430]]},
-    {"lane": 2, "polygon": [[338, 431], [350, 127], [376, 127], [516, 431], [338, 431]]},
-    {"lane": 3, "polygon": [[378, 127], [521, 430], [694, 431], [404, 127], [380, 127]]},
+    {"lane": 1, "polygon": [[238, 705], [431, 225], [564, 220], [569, 703], [240, 705]], "heading": -0.1282260515301158},
+    {"lane": 2, "polygon": [[569, 222], [581, 699], [937, 700], [708, 220], [571, 223]], "heading": 0.37753290805445644},
+    {"lane": 3, "polygon": [[272, 231], [419, 231], [280, 564], [7, 549], [271, 231]], "heading": -0.3947890352085097},
+    {"lane": 4, "polygon": [[568, 172], [679, 168], [609, 23], [552, 22], [568, 171]], "heading": -0.29575642032589883},
+    {"lane": 5, "polygon": [[452, 167], [557, 165], [547, 29], [491, 27], [453, 162]], "heading": -0.6147221707317188},
+    {"lane": 6, "polygon": [[439, 164], [481, 30], [481, 30], [425, 31], [306, 160], [437, 165]], "heading": -0.9870113119502333},
 ])
 
 HAS_SIGNAL = 0
@@ -639,6 +663,187 @@ def update_speed(
 
 
 # ============================================================
+# EVENT DETECTION
+# ============================================================
+#
+# track["metrics"] is a deque of (t_s, vx, vy, speed_kmh, lane) appended
+# once per frame with fresh, accepted data -- it's what speeding/harsh_brake
+# look back through for their time windows. track["fired"] tracks which
+# conditions are currently active so each rule emits once per episode
+# rather than every frame it holds true.
+
+
+def heading_degrees(vx, vy):
+    return math.degrees(math.atan2(vx, vy))
+
+
+def angle_diff_deg(a, b):
+    return abs(((a - b + 180) % 360) - 180)
+
+
+def lane_heading(lane):
+    if lane is None:
+        return None
+    for entry in LANES:
+        if entry.get("lane") == lane:
+            return entry.get("heading")
+    return None
+
+
+def value_at_or_before(metrics, target_t):
+    candidate = None
+    for sample in metrics:
+        if sample[0] <= target_t:
+            candidate = sample
+        else:
+            break
+    return candidate
+
+
+def windowed_mean_speed(metrics, t_s, window_s):
+    values = [m[3] for m in metrics if 0 <= t_s - m[0] <= window_s]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def emit_incident(incidents, track_id, t_ms, event_type, source, meta):
+    incidents.append({
+        "track_id": track_id,
+        "ts_ms": t_ms,
+        "type": event_type,
+        "source": source,
+        "conf": 1.0,
+        "meta_json": meta,
+    })
+
+
+def check_wrong_way(track, track_id, t_s, t_ms, vx, vy, lane, incidents):
+    legal = lane_heading(lane)
+    if legal is None:
+        legal = LEGAL_HEADING
+    if legal is None:
+        track["wrong_way_since"] = None
+        track["fired"]["wrong_way"] = False
+        return
+
+    heading = heading_degrees(vx, vy)
+    diff = angle_diff_deg(heading, legal)
+
+    if diff >= WRONG_WAY_ANGLE_DEG:
+        if track["wrong_way_since"] is None:
+            track["wrong_way_since"] = t_s
+        elif (
+            not track["fired"]["wrong_way"]
+            and t_s - track["wrong_way_since"] >= WRONG_WAY_DWELL_S
+        ):
+            emit_incident(
+                incidents, track_id, t_ms, "wrong_way", "video",
+                {"heading_deg": heading, "legal_heading_deg": legal, "diff_deg": diff},
+            )
+            track["fired"]["wrong_way"] = True
+    else:
+        track["wrong_way_since"] = None
+        track["fired"]["wrong_way"] = False
+
+
+def check_speeding(track, track_id, t_s, t_ms, lane, incidents):
+    mean_over = windowed_mean_speed(track["metrics"], t_s, SPEEDING_OVER_WINDOW_S)
+    if SPEED_LIMIT_KMH is not None and mean_over is not None and mean_over > SPEED_LIMIT_KMH:
+        if not track["fired"]["speeding_over"]:
+            emit_incident(
+                incidents, track_id, t_ms, "speeding", "video",
+                {"kind": "over", "mean_speed_kmh": mean_over, "speed_limit_kmh": SPEED_LIMIT_KMH},
+            )
+            track["fired"]["speeding_over"] = True
+    else:
+        track["fired"]["speeding_over"] = False
+
+    mean_under = windowed_mean_speed(track["metrics"], t_s, SPEEDING_UNDER_WINDOW_S)
+    if (
+        V_MIN_KMH is not None
+        and mean_under is not None
+        and mean_under < V_MIN_KMH
+        and lane is not None
+    ):
+        if not track["fired"]["speeding_under"]:
+            emit_incident(
+                incidents, track_id, t_ms, "speeding", "video",
+                {"kind": "under", "mean_speed_kmh": mean_under, "v_min_kmh": V_MIN_KMH},
+            )
+            track["fired"]["speeding_under"] = True
+    else:
+        track["fired"]["speeding_under"] = False
+
+
+def check_harsh_brake(track, track_id, t_s, t_ms, vy, incidents):
+    if t_s - track["first_t_s"] < HARSH_BRAKE_WINDOW_S:
+        return  # new IDs don't count -- not enough history yet
+
+    past = value_at_or_before(track["metrics"], t_s - HARSH_BRAKE_WINDOW_S)
+    if past is None:
+        track["fired"]["harsh_brake"] = False
+        return
+
+    drop_kmh = (past[2] - float(vy)) * 3.6  # positive = slowing down (+Y is forward)
+
+    if drop_kmh >= HARSH_BRAKE_DROP_KMH:
+        if not track["fired"]["harsh_brake"]:
+            emit_incident(
+                incidents, track_id, t_ms, "harsh_brake", "inferred",
+                {"drop_kmh": drop_kmh, "window_s": HARSH_BRAKE_WINDOW_S},
+            )
+            track["fired"]["harsh_brake"] = True
+    else:
+        track["fired"]["harsh_brake"] = False
+
+
+def check_weave(track, track_id, t_ms, incidents):
+    recent = list(track["metrics"])[-WEAVE_WINDOW_FRAMES:]
+    if len(recent) < WEAVE_WINDOW_FRAMES:
+        track["fired"]["weave"] = False
+        return
+
+    vlat_kmh = [m[1] * 3.6 for m in recent]
+    sustained = all(abs(v) > WEAVE_VLAT_LIM_KMH for v in vlat_kmh)
+
+    signs = [v > 0 for v in vlat_kmh if abs(v) > WEAVE_VLAT_LIM_KMH]
+    sign_flip = any(a != b for a, b in zip(signs, signs[1:]))
+
+    if sustained or sign_flip:
+        if not track["fired"]["weave"]:
+            emit_incident(
+                incidents, track_id, t_ms, "weave", "inferred",
+                {"vlat_kmh": vlat_kmh[-1], "sustained": sustained, "sign_flip": sign_flip},
+            )
+            track["fired"]["weave"] = True
+    else:
+        track["fired"]["weave"] = False
+
+
+def check_near_miss(frame_positions, t_ms, incidents, streaks):
+    ids = list(frame_positions.keys())
+
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            a, b = ids[i], ids[j]
+            xa, ya = frame_positions[a]
+            xb, yb = frame_positions[b]
+            gap = math.hypot(xa - xb, ya - yb)
+            key = (a, b) if a < b else (b, a)
+
+            if gap < NEAR_MISS_GAP_M:
+                streaks[key] = streaks.get(key, 0) + 1
+                if streaks[key] == NEAR_MISS_MIN_FRAMES + 1:
+                    emit_incident(
+                        incidents, a, t_ms, "near_miss", "inferred",
+                        {"other_track_id": int(b), "gap_m": gap},
+                    )
+            else:
+                streaks[key] = 0
+
+
+# ============================================================
 # DATABASE
 # ============================================================
 
@@ -797,6 +1002,33 @@ def save_tracks(
         )
 
 
+def save_incidents(client, incidents, source_id, place_id):
+
+    if not incidents:
+        return
+
+    rows = [
+        {
+            "source_id": source_id,
+            "place_id": place_id,
+            "track_id": int(incident["track_id"]),
+            "ts_ms": incident["ts_ms"],
+            "type": incident["type"],
+            "source": incident["source"],
+            "conf": incident["conf"],
+            "meta_json": incident["meta_json"],
+        }
+        for incident in incidents
+    ]
+
+    (
+        client
+        .table("incidents")
+        .insert(rows)
+        .execute()
+    )
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -939,6 +1171,9 @@ def main():
 
     tracks = {}
 
+    incidents = []
+    near_miss_streaks = {}
+
     frame_index = 0
 
     # ========================================================
@@ -1023,6 +1258,10 @@ def main():
         )
 
         result = results[0]
+
+        # Positions of every track that got a fresh, accepted sample this
+        # exact frame -- used by check_near_miss() after the object loop.
+        frame_positions = {}
 
         # ====================================================
         # OBJECTS
@@ -1144,6 +1383,9 @@ def main():
                         "first_t_ms":
                             t_ms,
 
+                        "first_t_s":
+                            t_ms / 1000.0,
+
                         "last_t_ms":
                             t_ms,
 
@@ -1171,6 +1413,23 @@ def main():
 
                         "vy":
                             0.0,
+
+                        # Event detection state
+                        "metrics":
+                            deque(
+                                maxlen=60
+                            ),
+
+                        "wrong_way_since":
+                            None,
+
+                        "fired": {
+                            "wrong_way": False,
+                            "speeding_over": False,
+                            "speeding_under": False,
+                            "harsh_brake": False,
+                            "weave": False,
+                        },
                     }
 
                 track = tracks[
@@ -1252,6 +1511,32 @@ def main():
                         track,
                         timestamp_s
                     )
+
+                    # ------------------------------------------------
+                    # EVENT DETECTION
+                    # ------------------------------------------------
+
+                    # vx/vy/speed_kmh come from numpy (polyfit/mean) --
+                    # cast to plain floats once here so every downstream
+                    # consumer (meta_json fields) is JSON-safe for free.
+                    track["metrics"].append(
+                        (timestamp_s, float(vx), float(vy), float(speed_kmh), lane_number)
+                    )
+
+                    check_wrong_way(
+                        track, track_id, timestamp_s, t_ms, vx, vy, lane_number, incidents
+                    )
+                    check_speeding(
+                        track, track_id, timestamp_s, t_ms, lane_number, incidents
+                    )
+                    check_harsh_brake(
+                        track, track_id, timestamp_s, t_ms, vy, incidents
+                    )
+                    check_weave(
+                        track, track_id, t_ms, incidents
+                    )
+
+                    frame_positions[track_id] = (X, Y)
 
                 else:
 
@@ -1408,6 +1693,8 @@ def main():
                     1
                 )
 
+        check_near_miss(frame_positions, t_ms, incidents, near_miss_streaks)
+
         # ====================================================
         # GLOBAL DISPLAY
         # ====================================================
@@ -1533,12 +1820,23 @@ def main():
             place_id
         )
 
+        save_incidents(
+            client,
+            incidents,
+            source_id,
+            place_id
+        )
+
         print(
             f"place_id: {place_id}"
         )
 
         print(
             f"source_id: {source_id}"
+        )
+
+        print(
+            f"incidents: {len(incidents)}"
         )
 
     except Exception as e:
