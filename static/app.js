@@ -1058,7 +1058,11 @@
     const P = Number(metrics.P) || 0;
     const E = Number(metrics.E) || 0;
     const C = Number(metrics.C) || 0;
-    const R_raw = a * V + b * P + c * E + d * C;
+    const aV = a * V;
+    const bP = b * P;
+    const cE = c * E;
+    const dC = d * C;
+    const R_raw = aV + bP + cE + dC;
     const R = Math.max(0, Math.min(100, R_raw));
     const band = R < 40 ? "cold" : R < 70 ? "warm" : "hot";
     const T = Number(metrics.T) || 1;
@@ -1077,7 +1081,7 @@
       .slice(0, 2)
       .join(",");
     return {
-      V, P, E, C, R, R_raw, band, top_types,
+      V, P, E, C, aV, bP, cE, dC, R, R_raw, band, top_types,
       vehicle_count: metrics.vehicle_count,
       window: ($("risk_window").value || "").trim() || "this_clip",
     };
@@ -1094,19 +1098,29 @@
     $("riskHero").hidden = false;
     $("riskBreakdown").hidden = false;
     $("riskR").textContent = fmtRisk(row.R);
-    const rawEl = $("riskRaw");
-    if (rawEl) {
-      const raw = row.R_raw;
-      rawEl.textContent = raw == null ? "—" : fmtRisk(raw);
-    }
     const band = row.band || "—";
     const tag = $("riskBand");
     tag.textContent = band;
     tag.className = "band-tag band-" + band;
-    $("riskV").textContent = fmtRisk(row.V);
-    $("riskP").textContent = fmtRisk(row.P);
-    $("riskE").textContent = fmtRisk(row.E);
-    $("riskC").textContent = fmtRisk(row.C);
+    const w = liveWeights();
+    const V = Number(row.V) || 0;
+    const P = Number(row.P) || 0;
+    const E = Number(row.E) || 0;
+    const C = Number(row.C) || 0;
+    const aV = row.aV != null ? row.aV : w.a * V;
+    const bP = row.bP != null ? row.bP : w.b * P;
+    const cE = row.cE != null ? row.cE : w.c * E;
+    const dC = row.dC != null ? row.dC : w.d * C;
+    const raw = row.R_raw != null ? row.R_raw : aV + bP + cE + dC;
+    $("riskV").textContent = fmtRisk(V);
+    $("riskP").textContent = fmtRisk(P);
+    $("riskE").textContent = fmtRisk(E);
+    $("riskC").textContent = fmtRisk(C);
+    if ($("riskVa")) $("riskVa").textContent = fmtRisk(aV);
+    if ($("riskPb")) $("riskPb").textContent = fmtRisk(bP);
+    if ($("riskEc")) $("riskEc").textContent = fmtRisk(cE);
+    if ($("riskCd")) $("riskCd").textContent = fmtRisk(dC);
+    if ($("riskRaw")) $("riskRaw").textContent = fmtRisk(raw);
     $("riskTop").textContent = row.top_types || "—";
     $("riskVehicles").textContent = fmtRisk(row.vehicle_count);
     $("riskWindowOut").textContent = row.window || "—";
@@ -1363,17 +1377,21 @@
   $("saveEventsBtn").addEventListener("click", () => saveEvents().catch((err) => log(String(err))));
   $("runIdentifyBtn").addEventListener("click", () => runIdentify().catch((err) => log(String(err))));
   $("saveRiskBtn").addEventListener("click", () => saveRisk().catch((err) => log(String(err))));
-  RISK_SK_KEYS.forEach((key) => {
-    const el = $("risk_sk_" + key);
-    if (el) el.addEventListener("input", onSkChanged);
-  });
-  RISK_WEIGHT_KEYS.forEach((key) => {
-    const el = $("risk_" + key);
-    if (el) el.addEventListener("input", onBlendChanged);
-  });
-  $("risk_window").addEventListener("input", () => {
-    if (state.riskMetrics) applyLiveRisk("Live — Save to persist.");
-  });
+  const riskPanel = $("panelRisk");
+  if (riskPanel) {
+    riskPanel.addEventListener("input", (ev) => {
+      const id = ev.target && ev.target.id;
+      if (!id) return;
+      if (id.indexOf("risk_sk_") === 0) onSkChanged();
+      else if (id === "risk_a" || id === "risk_b" || id === "risk_c" || id === "risk_d" || id === "risk_window") onBlendChanged();
+    });
+    riskPanel.addEventListener("change", (ev) => {
+      const id = ev.target && ev.target.id;
+      if (!id) return;
+      if (id.indexOf("risk_sk_") === 0) onSkChanged();
+      else if (id === "risk_a" || id === "risk_b" || id === "risk_c" || id === "risk_d" || id === "risk_window") onBlendChanged();
+    });
+  }
   $("prevFrameBtn").addEventListener("click", () => {
     if (state.frameIndex > 0) loadFrame(state.frameIndex - 1);
   });
