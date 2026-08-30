@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import sys
@@ -10,7 +11,7 @@ import torchvision.transforms as transforms
 from supabase import Client
 from ultralytics import YOLO
 
-from calibration_io import load_calibration
+from source_io import merge_events, resolve_source, video_file_for
 from supabase_client import get_client
 
 # The YOLOP repo has no top-level `YOLOP` package to import from — its
@@ -20,124 +21,131 @@ YOLOP_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "YOLOP")
 if YOLOP_ROOT not in sys.path:
     sys.path.append(YOLOP_ROOT)
 
-
+from lib.config import cfg  # noqa: E402
+from lib.models import get_net  # noqa: E402
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
+#
+# Video, place, homography, and lanes come from a UI ingest record
+# (data/sources/<id>/ingest.json). apply_source() fills the names below
+# at the start of main(). Detector weights stay here because they are
+# not per-clip inputs.
 
-VIDEO_PATH = "istockphoto-1282097660-640_adpp_is.mp4"
-
-# Your existing object detector
 OBJECT_MODEL_PATH = "yolo26m.pt"
-
-# YOLOP lane model
-# Download the official YOLOP End-to-end.pth
 LANE_MODEL_PATH = "YOLOP/weights/End-to-end.pth"
 
-OUTPUT_VIDEO = "stage1_lane_tracking.mp4"
+CONFIDENCE = None
+SPEED_SMOOTHING_FRAMES = None
+MAX_REASONABLE_SPEED_KMH = None
+MAX_REASONABLE_SPEED_MPS = None
+WRONG_WAY_ANGLE_DEG = None
+WRONG_WAY_DWELL_S = None
+SPEEDING_OVER_WINDOW_S = None
+SPEEDING_UNDER_WINDOW_S = None
+HARSH_BRAKE_DROP_KMH = None
+HARSH_BRAKE_WINDOW_S = None
+HARSH_BRAKE_MIN_SPEED_KMH = None
+NEAR_MISS_GAP_M = None
+NEAR_MISS_MIN_FRAMES = None
+WEAVE_VLAT_LIM_KMH = None
+WEAVE_WINDOW_FRAMES = None
 
-CONFIDENCE = 0.35
-
-# ------------------------------------------------------------
-# ROAD / CAMERA ASSUMPTIONS
-# ------------------------------------------------------------
-#
-# Loaded from calibration.json if it exists (written by
-# calibrate_homography.py / calibrate_lanes.py), so recalibrating never
-# requires editing this file. The literal values below are the fallback
-# used only if calibration.json is missing or incomplete -- currently the
-# last known-good calibration from this project's own history.
-
-_CALIBRATION = load_calibration()
-_HOMOGRAPHY_CAL = _CALIBRATION.get("homography", {})
-
-HOMOGRAPHY_SRC = _HOMOGRAPHY_CAL.get("src", [
-    [6, 527],     # near-left
-    [856, 522],   # near-right
-    [385, 39],    # far-left
-    [594, 40],    # far-right
-])
-
-LANE_WIDTH_M = _HOMOGRAPHY_CAL.get("lane_width_m", 10.5)
-
-# LANE_WIDTH_M is the combined width of NUM_LANES equal-width lanes, used to
-# calibrate the homography. Each individual lane's width for lane-number
-# classification is LANE_WIDTH_M / NUM_LANES. Only valid if the lanes are
-# uniform and parallel across the calibrated stretch of road.
-NUM_LANES = 3
-SINGLE_LANE_WIDTH_M = LANE_WIDTH_M / NUM_LANES
-
-# Engineering assumption for high-mounted expressway CCTV.
-# NOT a verified DME camera specification.
-CAMERA_HEIGHT_M = 8.0
-
-# Used for homography calibration.
-REFERENCE_DISTANCE_M = _HOMOGRAPHY_CAL.get("reference_distance_m", 147.0)
-
-SPEED_SMOOTHING_FRAMES = 10
-
-# Reject physically impossible instantaneous speeds
-MAX_REASONABLE_SPEED_KMH = 180.0
-
-# ------------------------------------------------------------
-# EVENT DETECTION (Stage 2 locked list, no lane_cut/red_light this pass)
-# ------------------------------------------------------------
-
-WRONG_WAY_ANGLE_DEG = 150.0
-WRONG_WAY_DWELL_S = 4.0
-
-# yours to set per place; each stays disabled (never fires) until set
+VIDEO_PATH = None
+OUTPUT_VIDEO = None
+SOURCE_ID = None
+PLACE_ID = None
+HOMOGRAPHY_SRC = None
+LANE_WIDTH_M = None
+REFERENCE_DISTANCE_M = None
+CAMERA_HEIGHT_M = None
 V_MIN_KMH = None
-SPEEDING_OVER_WINDOW_S = 0.5
-SPEEDING_UNDER_WINDOW_S = 1.0
-
-HARSH_BRAKE_DROP_KMH = 10.0
-HARSH_BRAKE_WINDOW_S = 1.0
-
-NEAR_MISS_GAP_M = 2.0
-NEAR_MISS_MIN_FRAMES = 3  # must exceed this, i.e. >=4 consecutive frames
-
-WEAVE_VLAT_LIM_KMH = 6.0
-WEAVE_WINDOW_FRAMES = 5
-
-# ------------------------------------------------------------
-# Road metadata
-# ------------------------------------------------------------
-
 LAT = None
 LNG = None
-
-ROAD_KIND = "expressway"
-
-SPEED_LIMIT_KMH = 80
-
-REF_LENGTH_M = SINGLE_LANE_WIDTH_M
-
-# The pixel points actually used above, whether from calibration.json or
-# the fallback -- this is what places.ref_points_json records.
-REF_POINTS = HOMOGRAPHY_SRC
-
+ROAD_KIND = None
+SPEED_LIMIT_KMH = None
+REF_LENGTH_M = None
+REF_POINTS = None
 STOP_LINE = None
 LEGAL_HEADING = None
-
-# Loaded from calibration.json's "lanes" section if present (written by
-# calibrate_lanes.py); falls back to the last known-good boxing otherwise.
-LANES = _CALIBRATION.get("lanes", [
-    {"lane": 1, "polygon": [[238, 705], [431, 225], [564, 220], [569, 703], [240, 705]], "heading": -0.1282260515301158},
-    {"lane": 2, "polygon": [[569, 222], [581, 699], [937, 700], [708, 220], [571, 223]], "heading": 0.37753290805445644},
-    {"lane": 3, "polygon": [[272, 231], [419, 231], [280, 564], [7, 549], [271, 231]], "heading": -0.3947890352085097},
-    {"lane": 4, "polygon": [[568, 172], [679, 168], [609, 23], [552, 22], [568, 171]], "heading": -0.29575642032589883},
-    {"lane": 5, "polygon": [[452, 167], [557, 165], [547, 29], [491, 27], [453, 162]], "heading": -0.6147221707317188},
-    {"lane": 6, "polygon": [[439, 164], [481, 30], [481, 30], [425, 31], [306, 160], [437, 165]], "heading": -0.9870113119502333},
-])
-
+LANES = None
 HAS_SIGNAL = 0
-CITY_PRIOR = 1.0
+CITY_PRIOR = None
 IS_NIGHT = 0
 IS_RAIN = 0
 IS_RUSH = 0
+CLOCK_START = None
+CLOCK_NOTE = None
+NOTES = None
+
+
+def apply_source(record: dict) -> None:
+    """Copy one UI ingest record into the module-level names used below."""
+    global VIDEO_PATH, OUTPUT_VIDEO, SOURCE_ID, PLACE_ID
+    global HOMOGRAPHY_SRC, LANE_WIDTH_M, REFERENCE_DISTANCE_M, CAMERA_HEIGHT_M
+    global V_MIN_KMH, LAT, LNG, ROAD_KIND, SPEED_LIMIT_KMH, REF_LENGTH_M
+    global REF_POINTS, STOP_LINE, LEGAL_HEADING, LANES
+    global HAS_SIGNAL, CITY_PRIOR, IS_NIGHT, IS_RAIN, IS_RUSH
+    global CLOCK_START, CLOCK_NOTE, NOTES
+    global CONFIDENCE, SPEED_SMOOTHING_FRAMES, MAX_REASONABLE_SPEED_KMH, MAX_REASONABLE_SPEED_MPS
+    global WRONG_WAY_ANGLE_DEG, WRONG_WAY_DWELL_S
+    global SPEEDING_OVER_WINDOW_S, SPEEDING_UNDER_WINDOW_S
+    global HARSH_BRAKE_DROP_KMH, HARSH_BRAKE_WINDOW_S, HARSH_BRAKE_MIN_SPEED_KMH
+    global NEAR_MISS_GAP_M, NEAR_MISS_MIN_FRAMES
+    global WEAVE_VLAT_LIM_KMH, WEAVE_WINDOW_FRAMES
+
+    video_path = video_file_for(record)
+    SOURCE_ID = record["source_id"]
+    PLACE_ID = record.get("place_id")
+    VIDEO_PATH = str(video_path)
+    OUTPUT_VIDEO = str(video_path.parent / "stage1_lane_tracking.mp4")
+
+    homo = record.get("homography") or {}
+    HOMOGRAPHY_SRC = homo.get("src")
+    LANE_WIDTH_M = homo.get("lane_width_m")
+    REFERENCE_DISTANCE_M = homo.get("reference_distance_m")
+    REF_POINTS = HOMOGRAPHY_SRC
+    REF_LENGTH_M = LANE_WIDTH_M
+
+    processing = record.get("processing") or {}
+    CAMERA_HEIGHT_M = processing.get("camera_height_m")
+    events = merge_events(record.get("events"), processing.get("v_min_kmh"))
+    CONFIDENCE = events["CONFIDENCE"]
+    SPEED_SMOOTHING_FRAMES = events["SPEED_SMOOTHING_FRAMES"]
+    MAX_REASONABLE_SPEED_KMH = events["MAX_REASONABLE_SPEED_KMH"]
+    MAX_REASONABLE_SPEED_MPS = MAX_REASONABLE_SPEED_KMH / 3.6
+    WRONG_WAY_ANGLE_DEG = events["WRONG_WAY_ANGLE_DEG"]
+    WRONG_WAY_DWELL_S = events["WRONG_WAY_DWELL_S"]
+    SPEEDING_OVER_WINDOW_S = events["SPEEDING_OVER_WINDOW_S"]
+    SPEEDING_UNDER_WINDOW_S = events["SPEEDING_UNDER_WINDOW_S"]
+    HARSH_BRAKE_DROP_KMH = events["HARSH_BRAKE_DROP_KMH"]
+    HARSH_BRAKE_WINDOW_S = events["HARSH_BRAKE_WINDOW_S"]
+    HARSH_BRAKE_MIN_SPEED_KMH = events["HARSH_BRAKE_MIN_SPEED_KMH"]
+    NEAR_MISS_GAP_M = events["NEAR_MISS_GAP_M"]
+    NEAR_MISS_MIN_FRAMES = events["NEAR_MISS_MIN_FRAMES"]
+    WEAVE_VLAT_LIM_KMH = events["WEAVE_VLAT_LIM_KMH"]
+    WEAVE_WINDOW_FRAMES = events["WEAVE_WINDOW_FRAMES"]
+    V_MIN_KMH = events.get("V_MIN_KMH")
+
+    place = record.get("place") or {}
+    LAT = place.get("lat")
+    LNG = place.get("lng")
+    ROAD_KIND = place.get("road_kind")
+    SPEED_LIMIT_KMH = place.get("speed_limit_kmh")
+    HAS_SIGNAL = place.get("has_signal") or 0
+    CITY_PRIOR = place.get("city_prior")
+    IS_NIGHT = place.get("is_night") or 0
+    IS_RAIN = place.get("is_rain") or 0
+    IS_RUSH = place.get("is_rush") or 0
+    STOP_LINE = place.get("stop_line_json")
+    LEGAL_HEADING = place.get("legal_heading")
+
+    LANES = record.get("lanes") or []
+    CLOCK_START = record.get("clock_start")
+    CLOCK_NOTE = record.get("clock_note")
+    NOTES = record.get("notes")
 
 
 # ============================================================
@@ -268,11 +276,13 @@ def create_homography():
         far-left   = (0, REFERENCE_DISTANCE_M)
         far-right  = (LANE_WIDTH_M, REFERENCE_DISTANCE_M)
 
-    HOMOGRAPHY_SRC / LANE_WIDTH_M / REFERENCE_DISTANCE_M come from
-    calibration.json (see the CONFIGURATION section) -- re-run
-    calibrate_homography.py if the camera or video ever changes, rather
-    than editing values here.
+    Points and metres come from the UI homography step (ingest.json).
     """
+
+    if not HOMOGRAPHY_SRC or LANE_WIDTH_M is None or REFERENCE_DISTANCE_M is None:
+        raise RuntimeError(
+            "Homography inputs are missing. Finish step 2 in the UI first."
+        )
 
     src = np.float32(HOMOGRAPHY_SRC)
 
@@ -332,10 +342,9 @@ def pixel_to_world(x, y):
 # PIXEL -> LANE NUMBER
 # ============================================================
 #
-# LANES is manually boxed per video via calibrate_lanes.py, as a list of
+# LANES is boxed per video in the UI (or calibrate_lanes.py) as a list of
 # {"lane": n, "polygon": [[x, y], ...]} pixel-space polygons -- one per
-# lane, drawn by hand so curves/merges don't need special-case code.
-# LANE_POLYGONS caches the parsed numpy polygons; built once in main().
+# lane. LANE_POLYGONS caches the parsed numpy polygons; built once in main().
 
 LANE_POLYGONS = None
 
@@ -552,8 +561,11 @@ def draw_lane_polygons(frame, lane_polygons):
 # ============================================================
 # VELOCITY
 # ============================================================
-
-MAX_REASONABLE_SPEED_MPS = MAX_REASONABLE_SPEED_KMH / 3.6
+#
+# MAX_REASONABLE_SPEED_MPS is derived from MAX_REASONABLE_SPEED_KMH inside
+# apply_source() (not here) -- computing it at module level would run
+# before apply_source() ever sets a real value, dividing None by 3.6 and
+# crashing on import.
 
 
 def is_plausible_world_step(history, t, x, y):
@@ -784,6 +796,13 @@ def check_harsh_brake(track, track_id, t_s, t_ms, vy, incidents):
         track["fired"]["harsh_brake"] = False
         return
 
+    past_speed_kmh = past[2] * 3.6
+    if past_speed_kmh < HARSH_BRAKE_MIN_SPEED_KMH:
+        # Too slow beforehand for a "drop" to mean anything (e.g. a
+        # near-stationary car's vy jitter shouldn't read as braking).
+        track["fired"]["harsh_brake"] = False
+        return
+
     drop_kmh = (past[2] - float(vy)) * 3.6  # positive = slowing down (+Y is forward)
 
     if drop_kmh >= HARSH_BRAKE_DROP_KMH:
@@ -910,9 +929,7 @@ def create_input(
     place_id
 ):
 
-    source_id = os.path.basename(
-        VIDEO_PATH
-    )
+    source_id = SOURCE_ID or os.path.basename(VIDEO_PATH)
 
     row = {
 
@@ -931,13 +948,13 @@ def create_input(
             ),
 
         "clock_start":
-            None,
+            CLOCK_START,
 
         "clock_note":
-            "demo-time",
+            CLOCK_NOTE,
 
         "notes":
-            "Delhi-Meerut Expressway traffic video",
+            NOTES,
     }
 
     (
@@ -1042,6 +1059,22 @@ def main():
     global HOMOGRAPHY
     global LANE_POLYGONS
 
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
+    try:
+        record = resolve_source(arg)
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    apply_source(record)
+    print(f"\nSource: {SOURCE_ID}")
+    print(f"Video:  {VIDEO_PATH}")
+
+    if not HOMOGRAPHY_SRC or LANE_WIDTH_M is None or REFERENCE_DISTANCE_M is None:
+        raise SystemExit(
+            "Homography is missing for this source. Finish step 2 in the UI "
+            "(http://localhost:8000) before running detection."
+        )
+
     # --------------------------------------------------------
     # CHECK VIDEO
     # --------------------------------------------------------
@@ -1122,8 +1155,7 @@ def main():
     if LANE_POLYGONS is None:
         print(
             "\nLANES not set -- lane numbers will be recorded as None. "
-            "Run calibrate_lanes.py to save lane polygons into "
-            "calibration.json."
+            "Finish step 3 (lane boxing) in the UI first."
         )
 
     
@@ -1711,23 +1743,24 @@ def main():
             2
         )
 
-        cv2.putText(
+        if CAMERA_HEIGHT_M is not None:
+            cv2.putText(
 
-            frame,
+                frame,
 
-            f"Camera height assumption: "
-            f"{CAMERA_HEIGHT_M:.1f} m",
+                f"Camera height assumption: "
+                f"{CAMERA_HEIGHT_M:.1f} m",
 
-            (20, 60),
+                (20, 60),
 
-            cv2.FONT_HERSHEY_SIMPLEX,
+                cv2.FONT_HERSHEY_SIMPLEX,
 
-            0.5,
+                0.5,
 
-            (255, 255, 255),
+                (255, 255, 255),
 
-            1
-        )
+                1
+            )
 
         out.write(frame)
 
@@ -1787,6 +1820,11 @@ def main():
         "================================"
     )
 
+    incidents_path = os.path.join(os.path.dirname(VIDEO_PATH), "incidents.json")
+    with open(incidents_path, "w", encoding="utf-8") as handle:
+        json.dump(incidents, handle, indent=2, default=str)
+    print(f"Incidents: {len(incidents)} → {incidents_path}")
+
     # ========================================================
     # DATABASE
     # ========================================================
@@ -1795,14 +1833,22 @@ def main():
 
         client = get_client()
 
-        place_id = create_place(
-            client
-        )
+        place_id = PLACE_ID
+        source_id = SOURCE_ID
 
-        source_id = create_input(
-            client,
-            place_id
-        )
+        if place_id is None:
+            place_id = create_place(client)
+            source_id = create_input(client, place_id)
+        else:
+            client.table("places").update(
+                {
+                    "ref_length_m": REF_LENGTH_M,
+                    "ref_points_json": REF_POINTS,
+                    "lanes_json": LANES,
+                    "legal_heading": LEGAL_HEADING,
+                    "stop_line_json": STOP_LINE,
+                }
+            ).eq("place_id", place_id).execute()
 
         save_tracks(
 

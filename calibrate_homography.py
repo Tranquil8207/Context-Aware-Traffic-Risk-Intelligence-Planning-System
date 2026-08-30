@@ -25,8 +25,11 @@ Controls:
     q / Esc      quit, then answer the measurement prompts and save results
 
 Usage:
-    python calibrate_homography.py [video_path] [start_frame]
+    python calibrate_homography.py [source_id] [start_frame]
                                     [--lane-width M] [--reference-distance M]
+
+    source_id is an ingested UI source (or omit for the latest). There is
+    no hardcoded demo video.
 
     --lane-width/--reference-distance just pre-fill the terminal prompt's
     default after clicking - they're shown and must be confirmed (or
@@ -34,16 +37,14 @@ Usage:
 """
 
 import argparse
+import json
 
 import cv2
 import numpy as np
 
-from calibration_io import CALIBRATION_PATH, update_calibration
+from source_io import resolve_source, video_file_for
 
-DEFAULT_VIDEO_PATH = "istockphoto-1282097660-640_adpp_is.mp4"
-
-# Fallback real-world measurements if not overridden on the command line.
-# Must match LANE_WIDTH_M / REFERENCE_DISTANCE_M in objectdetection.py.
+# Prompt defaults only — confirmed interactively, never used as a video.
 DEFAULT_LANE_WIDTH_M = 3.5
 DEFAULT_REFERENCE_DISTANCE_M = 20.0
 
@@ -57,7 +58,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Click-to-calibrate helper for objectdetection.py's homography."
     )
-    parser.add_argument("video_path", nargs="?", default=DEFAULT_VIDEO_PATH)
+    parser.add_argument(
+        "video_path",
+        nargs="?",
+        default=None,
+        help="UI source_id, ingest folder, or video path. Default: latest UI source.",
+    )
     parser.add_argument("start_frame", nargs="?", type=int, default=0)
     parser.add_argument(
         "--lane-width",
@@ -141,7 +147,7 @@ def prompt_float(label: str, default: float) -> float:
         return default
 
 
-def save_result(lane_width_m: float, reference_distance_m: float) -> None:
+def save_result(lane_width_m: float, reference_distance_m: float, record: dict) -> None:
     if len(points) != 4:
         print("\nLess than 4 points selected - nothing saved.")
         return
@@ -151,10 +157,22 @@ def save_result(lane_width_m: float, reference_distance_m: float) -> None:
         "lane_width_m": lane_width_m,
         "reference_distance_m": reference_distance_m,
     }
-    update_calibration("homography", homography_data)
+    record["homography"] = homography_data
+    record["processing"] = {
+        **(record.get("processing") or {}),
+        "lane_width_m": lane_width_m,
+        "reference_distance_m": reference_distance_m,
+    }
+    record["stage"] = "lanes"
+    ingest_path = video_file_for(record).parent / "ingest.json"
+    ingest_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    (video_file_for(record).parent / "calibration.json").write_text(
+        json.dumps({"homography": homography_data, "lanes": record.get("lanes") or []}, indent=2),
+        encoding="utf-8",
+    )
 
     near_left, near_right, far_left, far_right = points
-    print(f"\nSaved to {CALIBRATION_PATH}:")
+    print(f"\nSaved to {ingest_path}:")
     print(f"  near-left={near_left}  near-right={near_right}")
     print(f"  far-left={far_left}  far-right={far_right}")
     print(f"  lane_width_m={lane_width_m}  reference_distance_m={reference_distance_m}")
@@ -167,14 +185,20 @@ def save_result(lane_width_m: float, reference_distance_m: float) -> None:
 def main() -> None:
     args = parse_args()
 
-    cap = cv2.VideoCapture(args.video_path)
+    try:
+        record = resolve_source(args.video_path)
+        video_path = str(video_file_for(record))
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise RuntimeError(f"Could not open video: {args.video_path}")
+        raise RuntimeError(f"Could not open video: {video_path}")
 
     frame_index = args.start_frame
     frame = load_frame(cap, frame_index)
     if frame is None:
-        raise RuntimeError(f"Could not read starting frame {frame_index} from {args.video_path}")
+        raise RuntimeError(f"Could not read starting frame {frame_index} from {video_path}")
 
     window = "Calibration - click near-left, near-right, far-left, far-right"
     cv2.namedWindow(window)
@@ -229,7 +253,7 @@ def main() -> None:
         lane_width = args.lane_width
         reference_distance = args.reference_distance
 
-    save_result(lane_width, reference_distance)
+    save_result(lane_width, reference_distance, record)
 
 
 if __name__ == "__main__":

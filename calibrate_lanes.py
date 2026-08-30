@@ -38,18 +38,20 @@ Lane numbers are assigned in the order you finish each lane, starting at 1
 numbers come out meaningful.
 
 Usage:
-    python calibrate_lanes.py [video_path] [start_frame]
+    python calibrate_lanes.py [source_id] [start_frame]
+
+    source_id is an ingested UI source (or omit for the latest). There is
+    no hardcoded demo video.
 """
 
+import json
 import math
 import sys
 
 import cv2
 import numpy as np
 
-from calibration_io import CALIBRATION_PATH, load_calibration, update_calibration
-
-DEFAULT_VIDEO_PATH = "istockphoto-1282097660-640_adpp_is.mp4"
+from source_io import resolve_source, video_file_for
 
 LANE_COLORS = [
     (255, 0, 0),
@@ -229,7 +231,7 @@ def finalize_pending_lane() -> None:
     current_arrow.clear()
 
 
-def save_result() -> None:
+def save_result(record: dict) -> None:
     if not finished_lanes:
         print("\nNo lanes finished -- nothing saved.")
         return
@@ -242,9 +244,16 @@ def save_result() -> None:
         }
         for i, entry in enumerate(finished_lanes)
     ]
-    update_calibration("lanes", lanes_data)
+    record["lanes"] = lanes_data
+    record["stage"] = "ready"
+    ingest_path = video_file_for(record).parent / "ingest.json"
+    ingest_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    (video_file_for(record).parent / "calibration.json").write_text(
+        json.dumps({"homography": record.get("homography") or {}, "lanes": lanes_data}, indent=2),
+        encoding="utf-8",
+    )
 
-    print(f"\nSaved {len(lanes_data)} lane(s) to {CALIBRATION_PATH}.")
+    print(f"\nSaved {len(lanes_data)} lane(s) to {ingest_path}.")
     print(
         "objectdetection.py will pick this up automatically on its next "
         "run - no copy-pasting needed."
@@ -254,16 +263,19 @@ def save_result() -> None:
 def main() -> None:
     global HOMOGRAPHY
 
-    video_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_VIDEO_PATH
-    frame_index = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    try:
+        record = resolve_source(sys.argv[1] if len(sys.argv) > 1 else None)
+        video_path = str(video_file_for(record))
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
+    frame_index = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 0
 
-    HOMOGRAPHY = build_homography(load_calibration().get("homography", {}))
+    HOMOGRAPHY = build_homography(record.get("homography") or {})
     if HOMOGRAPHY is None:
         print(
-            "No homography calibration found (or incomplete) in "
-            f"{CALIBRATION_PATH}. Run calibrate_homography.py first if you "
-            "want per-lane legal_heading; lanes will still save fine "
-            "otherwise, just with heading: null.\n"
+            "No homography on this source yet. Finish step 2 in the UI "
+            "first if you want per-lane headings; lanes will still save "
+            "with heading: null.\n"
         )
 
     cap = cv2.VideoCapture(video_path)
@@ -338,7 +350,7 @@ def main() -> None:
 
     cap.release()
     cv2.destroyAllWindows()
-    save_result()
+    save_result(record)
 
 
 if __name__ == "__main__":

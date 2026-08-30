@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>catris v0.1</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+</head>
+<body>
+  <div class="app">
+    <header class="titlebar">
+      <span class="app-mark" aria-hidden="true"></span>
+      <span id="windowTitle">catris v0.1  —  [untitled]</span>
+    </header>
+
+    <nav class="menubar" aria-label="Application">
+      <div class="menu">
+        <button type="button" class="menu-btn" data-menu="file">File</button>
+        <div class="menu-list" id="menu-file">
+          <button type="button" data-action="new">New Project<span>Ctrl+N</span></button>
+          <button type="button" data-action="open">Open Video…<span>Ctrl+O</span></button>
+          <button type="button" data-action="ingest">Ingest Source<span>Ctrl+Return</span></button>
+          <hr />
+          <button type="button" data-action="about">About catris</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button type="button" class="menu-btn" data-menu="module">Module</button>
+        <div class="menu-list" id="menu-module">
+          <button type="button" class="checked" data-goto="ingest">Ingest</button>
+          <button type="button" id="menuHomography" data-goto="homography" disabled>Homography</button>
+          <button type="button" id="menuLanes" data-goto="lanes" disabled>Lanes</button>
+          <button type="button" id="menuEvents" data-goto="events" disabled>Events</button>
+          <button type="button" id="menuRisk" data-goto="risk" disabled>Risk</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button type="button" class="menu-btn" data-menu="view">View</button>
+        <div class="menu-list" id="menu-view">
+          <button type="button" class="checked" data-action="toggle-tree">Object Explorer</button>
+          <button type="button" class="checked" data-action="toggle-log">Log</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button type="button" class="menu-btn" data-menu="help">Help</button>
+        <div class="menu-list" id="menu-help">
+          <button type="button" data-action="about">About catris</button>
+        </div>
+      </div>
+    </nav>
+
+    <div class="toolbar" role="toolbar">
+      <button type="button" class="toolbtn" data-action="new" title="New Project">
+        <svg viewBox="0 0 16 16"><rect x="3" y="2" width="10" height="12" rx="1" fill="none" stroke="currentColor"/><path d="M6 1.5h4v3H6z" fill="currentColor"/></svg>
+      </button>
+      <button type="button" class="toolbtn" data-action="open" title="Open Video">
+        <svg viewBox="0 0 16 16"><path d="M2 4h5l1.5 1.5H14v8H2z" fill="none" stroke="currentColor"/></svg>
+      </button>
+      <span class="tool-sep"></span>
+      <button type="button" class="toolbtn" id="prevFrameBtn" title="Previous frame" disabled>
+        <svg viewBox="0 0 16 16"><path d="M10 3 L5 8 L10 13" fill="none" stroke="currentColor"/></svg>
+      </button>
+      <button type="button" class="toolbtn" id="nextFrameBtn" title="Next frame" disabled>
+        <svg viewBox="0 0 16 16"><path d="M6 3 L11 8 L6 13" fill="none" stroke="currentColor"/></svg>
+      </button>
+      <span class="module-chip" id="moduleChip">Step 1 / 3  —  Ingest</span>
+    </div>
+
+    <div class="workspace">
+      <aside class="dock dock-left" id="dockTree">
+        <div class="dock-title">Objects</div>
+        <div class="tree" id="objectTree">
+          <details open>
+            <summary>Sources</summary>
+            <div class="tree-empty" id="sourceTree">No sources ingested</div>
+          </details>
+        </div>
+      </aside>
+
+      <section class="main-col">
+        <div class="stepbar" id="stepbar">
+          <button type="button" class="step on" data-goto="ingest" id="tabIngest">1 Ingest</button>
+          <button type="button" class="step" data-goto="homography" id="tabHomography" disabled>2 Homography</button>
+          <button type="button" class="step" data-goto="lanes" id="tabLanes" disabled>3 Lanes</button>
+          <button type="button" class="step" data-goto="events" id="tabEvents" disabled>4 Events</button>
+          <button type="button" class="step" data-goto="risk" id="tabRisk" disabled>5 Risk</button>
+        </div>
+
+        <div class="view-stage" id="dropZone">
+          <video id="preview" controls hidden></video>
+          <canvas id="calibCanvas" hidden></canvas>
+          <div class="empty-view" id="emptyView">
+            <div class="empty-title">Drop a video to ingest</div>
+            <div class="empty-hint">File → Open Video…  or drop an .mp4 here</div>
+          </div>
+          <div class="view-hud" id="viewHud"></div>
+        </div>
+
+        <div class="step-panel" id="panelIngest">
+          <div class="group">
+            <div class="group-title">Place / clip parameters</div>
+            <p class="panel-lead">Fill these for <em>this</em> video. Homography and lane boxing come after ingest.</p>
+            <form id="ingestForm" autocomplete="off">
+              <input id="videoFile" type="file" accept="video/*,.mp4,.avi,.mkv,.mov,.webm" hidden />
+              <table class="form-table">
+                <thead>
+                  <tr>
+                    <th>Constant</th>
+                    <th>Value</th>
+                    <th>Why it needs a fresh look</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><label for="speed_limit_kmh">SPEED_LIMIT_KMH</label></td>
+                    <td>
+                      <div class="unit-field">
+                        <input id="speed_limit_kmh" name="speed_limit_kmh" type="number" step="1" value="80" />
+                        <span>km/h</span>
+                      </div>
+                    </td>
+                    <td class="why">The actual posted/expected limit for this road</td>
+                  </tr>
+                  <tr>
+                    <td><label for="v_min_kmh">V_MIN_KMH</label></td>
+                    <td>
+                      <div class="unit-field">
+                        <input id="v_min_kmh" name="v_min_kmh" type="number" step="1" placeholder="unset" />
+                        <span>km/h</span>
+                      </div>
+                    </td>
+                    <td class="why">The crawl-speed threshold for this road</td>
+                  </tr>
+                  <tr>
+                    <td><label for="road_kind">ROAD_KIND</label></td>
+                    <td>
+                      <select id="road_kind" name="road_kind">
+                        <option value="expressway" selected>expressway</option>
+                        <option value="highway">highway</option>
+                        <option value="arterial">arterial</option>
+                        <option value="collector">collector</option>
+                        <option value="local">local</option>
+                        <option value="intersection">intersection</option>
+                      </select>
+                    </td>
+                    <td class="why">Descriptive only (doesn't drive logic), but should match reality</td>
+                  </tr>
+                  <tr>
+                    <td>IS_NIGHT / IS_RAIN / IS_RUSH</td>
+                    <td>
+                      <div class="checks inline">
+                        <label class="check"><input type="checkbox" id="is_night" /> IS_NIGHT</label>
+                        <label class="check"><input type="checkbox" id="is_rain" /> IS_RAIN</label>
+                        <label class="check"><input type="checkbox" id="is_rush" /> IS_RUSH</label>
+                      </div>
+                    </td>
+                    <td class="why">Conditions in this specific clip</td>
+                  </tr>
+                  <tr>
+                    <td><label for="lat">LAT / LNG</label></td>
+                    <td>
+                      <div class="pair">
+                        <input id="lat" name="lat" type="number" step="any" placeholder="lat" />
+                        <input id="lng" name="lng" type="number" step="any" placeholder="lng" />
+                      </div>
+                    </td>
+                    <td class="why">New location's real coordinates, if known</td>
+                  </tr>
+                  <tr>
+                    <td><label for="has_signal">HAS_SIGNAL</label></td>
+                    <td>
+                      <label class="check"><input type="checkbox" id="has_signal" /> this location has a signal</label>
+                    </td>
+                    <td class="why">Whether this location actually has a signal</td>
+                  </tr>
+                  <tr>
+                    <td><label for="city_prior">CITY_PRIOR</label></td>
+                    <td>
+                      <input id="city_prior" name="city_prior" type="number" step="0.1" value="1.0" />
+                    </td>
+                    <td class="why">Only needs revisiting if the new video is a different city</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="form-actions">
+                <span class="file-name" id="filePath">(no video)</span>
+                <button type="button" id="browseBtn">Browse…</button>
+                <button type="submit" class="primary" id="ingestBtn">Ingest Source</button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <div class="step-panel" id="panelHomography" hidden>
+          <div class="group">
+            <div class="group-title">Homography</div>
+            <p class="panel-lead">Click four identifiable road points in order: <strong>near-left</strong>, <strong>near-right</strong>, <strong>far-left</strong>, <strong>far-right</strong>. Near and far pairs should be the same real lane width apart. Then enter the two real-world measurements — a homography cannot recover scale from pixels alone.</p>
+            <div class="calib-grid">
+              <table class="form-table compact">
+                <thead>
+                  <tr><th>Point</th><th>x</th><th>y</th></tr>
+                </thead>
+                <tbody id="homoPoints">
+                  <tr><td>1 near-left</td><td>—</td><td>—</td></tr>
+                  <tr><td>2 near-right</td><td>—</td><td>—</td></tr>
+                  <tr><td>3 far-left</td><td>—</td><td>—</td></tr>
+                  <tr><td>4 far-right</td><td>—</td><td>—</td></tr>
+                </tbody>
+              </table>
+              <div>
+                <div class="row">
+                  <label for="lane_width_m">LANE_WIDTH_M</label>
+                  <div class="unit-field">
+                    <input id="lane_width_m" type="number" step="0.1" value="3.5" />
+                    <span>m</span>
+                  </div>
+                </div>
+                <p class="why">Real distance between near-left/near-right (and far-left/far-right).</p>
+                <div class="row">
+                  <label for="reference_distance_m">REFERENCE_DISTANCE_M</label>
+                  <div class="unit-field">
+                    <input id="reference_distance_m" type="number" step="0.1" value="20" />
+                    <span>m</span>
+                  </div>
+                </div>
+                <p class="why">Real distance between the near line and the far line.</p>
+                <p class="keys">click=add point · r=reset · n/p=frame · frame <span id="frameLabel">0 / 0</span></p>
+                <div class="form-actions">
+                  <button type="button" id="resetHomoBtn">Reset points</button>
+                  <button type="button" class="primary" id="saveHomoBtn">Save Homography</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="step-panel" id="panelLanes" hidden>
+          <div class="group">
+            <div class="group-title">Lane boxing</div>
+            <p class="panel-lead">Trace each lane polygon (3+ points), press <strong>Enter</strong> to finish the boundary, then click a 2-point direction arrow (travel start → end). Headings are converted through the homography into world space.</p>
+            <div class="calib-grid">
+              <table class="form-table compact">
+                <thead>
+                  <tr><th>#</th><th>points</th><th>heading</th></tr>
+                </thead>
+                <tbody id="laneRows">
+                  <tr><td colspan="3" class="why">No lanes finished</td></tr>
+                </tbody>
+              </table>
+              <div>
+                <p class="keys" id="laneStatus">Current lane points: 0</p>
+                <p class="keys">click=add · u=undo point · Enter=finish/skip heading · z=undo lane · r=reset current · n/p=frame</p>
+                <div class="form-actions">
+                  <button type="button" id="undoPointBtn">Undo point</button>
+                  <button type="button" id="finishLaneBtn">Finish boundary</button>
+                  <button type="button" id="undoLaneBtn">Undo lane</button>
+                  <button type="button" class="primary" id="saveLanesBtn">Save Lanes</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="step-panel" id="panelEvents" hidden>
+          <div class="group">
+            <div class="group-title">Event identification</div>
+            <p class="panel-lead">These thresholds fire <code>wrong_way</code>, <code>speeding</code>, <code>harsh_brake</code>, <code>near_miss</code>, and weave. Risk scoring (V/P/E/C/R) is next — save these, then run identification.</p>
+            <table class="form-table">
+              <thead>
+                <tr>
+                  <th>Constant</th>
+                  <th>Value</th>
+                  <th>Why you might change it</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>SPEED_LIMIT_KMH</td>
+                  <td><span id="ev_SPEED_LIMIT_SHOW">—</span> km/h</td>
+                  <td class="why">From ingest. Over-speed uses this as the posted limit.</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_V_MIN_KMH">V_MIN_KMH</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_V_MIN_KMH" type="number" step="1" placeholder="unset" />
+                      <span>km/h</span>
+                    </div>
+                  </td>
+                  <td class="why">Crawl-speed threshold. Empty = under-speed never fires.</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_CONFIDENCE">CONFIDENCE</label></td>
+                  <td><input id="ev_CONFIDENCE" type="number" step="0.05" min="0" max="1" value="0.35" /></td>
+                  <td class="why">Min detector score to start a track</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_SPEED_SMOOTHING_FRAMES">SPEED_SMOOTHING_FRAMES</label></td>
+                  <td><input id="ev_SPEED_SMOOTHING_FRAMES" type="number" step="1" min="1" value="10" /></td>
+                  <td class="why">Rolling window for speed estimates</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_MAX_REASONABLE_SPEED_KMH">MAX_REASONABLE_SPEED_KMH</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_MAX_REASONABLE_SPEED_KMH" type="number" step="1" value="180" />
+                      <span>km/h</span>
+                    </div>
+                  </td>
+                  <td class="why">Drop physically impossible speed spikes</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_WRONG_WAY_ANGLE_DEG">WRONG_WAY_ANGLE_DEG</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_WRONG_WAY_ANGLE_DEG" type="number" step="1" value="150" />
+                      <span>deg</span>
+                    </div>
+                  </td>
+                  <td class="why">Heading vs legal heading to count as opposite</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_WRONG_WAY_DWELL_S">WRONG_WAY_DWELL_S</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_WRONG_WAY_DWELL_S" type="number" step="0.1" value="4" />
+                      <span>s</span>
+                    </div>
+                  </td>
+                  <td class="why">Must hold that long before a wrong-way fires</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_SPEEDING_OVER_WINDOW_S">SPEEDING_OVER_WINDOW_S</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_SPEEDING_OVER_WINDOW_S" type="number" step="0.1" value="0.5" />
+                      <span>s</span>
+                    </div>
+                  </td>
+                  <td class="why">Mean-speed window compared to SPEED_LIMIT_KMH</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_SPEEDING_UNDER_WINDOW_S">SPEEDING_UNDER_WINDOW_S</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_SPEEDING_UNDER_WINDOW_S" type="number" step="0.1" value="1" />
+                      <span>s</span>
+                    </div>
+                  </td>
+                  <td class="why">Mean-speed window compared to V_MIN_KMH</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_HARSH_BRAKE_DROP_KMH">HARSH_BRAKE_DROP_KMH</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_HARSH_BRAKE_DROP_KMH" type="number" step="0.5" value="7" />
+                      <span>km/h</span>
+                    </div>
+                  </td>
+                  <td class="why">Speed drop inside the brake window</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_HARSH_BRAKE_WINDOW_S">HARSH_BRAKE_WINDOW_S</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_HARSH_BRAKE_WINDOW_S" type="number" step="0.1" value="1" />
+                      <span>s</span>
+                    </div>
+                  </td>
+                  <td class="why">Lookback for that drop</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_HARSH_BRAKE_MIN_SPEED_KMH">HARSH_BRAKE_MIN_SPEED_KMH</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_HARSH_BRAKE_MIN_SPEED_KMH" type="number" step="1" value="20" />
+                      <span>km/h</span>
+                    </div>
+                  </td>
+                  <td class="why">Speed before the drop must be above this, or it's not really braking</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_NEAR_MISS_GAP_M">NEAR_MISS_GAP_M</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_NEAR_MISS_GAP_M" type="number" step="0.1" value="2" />
+                      <span>m</span>
+                    </div>
+                  </td>
+                  <td class="why">World-space gap between two vehicles</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_NEAR_MISS_MIN_FRAMES">NEAR_MISS_MIN_FRAMES</label></td>
+                  <td><input id="ev_NEAR_MISS_MIN_FRAMES" type="number" step="1" min="1" value="3" /></td>
+                  <td class="why">Consecutive frames the gap must hold (fires on the next)</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_WEAVE_VLAT_LIM_KMH">WEAVE_VLAT_LIM_KMH</label></td>
+                  <td>
+                    <div class="unit-field">
+                      <input id="ev_WEAVE_VLAT_LIM_KMH" type="number" step="0.5" value="6" />
+                      <span>km/h</span>
+                    </div>
+                  </td>
+                  <td class="why">Lateral speed to count as weaving</td>
+                </tr>
+                <tr>
+                  <td><label for="ev_WEAVE_WINDOW_FRAMES">WEAVE_WINDOW_FRAMES</label></td>
+                  <td><input id="ev_WEAVE_WINDOW_FRAMES" type="number" step="1" min="2" value="5" /></td>
+                  <td class="why">Frames of lateral motion / sign-flip</td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="form-actions">
+              <button type="button" id="saveEventsBtn">Save parameters</button>
+              <button type="button" class="primary" id="runIdentifyBtn">Run event identification</button>
+            </div>
+          </div>
+          <div class="group">
+            <div class="group-title">Identification output</div>
+            <p class="keys" id="identifyStatus">Not run yet.</p>
+            <table class="form-table compact">
+              <thead>
+                <tr><th>type</th><th>source</th><th>track</th><th>t_ms</th></tr>
+              </thead>
+              <tbody id="incidentRows">
+                <tr><td colspan="4" class="why">No incidents yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="group">
+            <div class="group-title">Risk scoring</div>
+            <p class="panel-lead">V / P / E / C / R and dispatch cards wait on the scoring formulas. Identification above is what those will consume.</p>
+          </div>
+        </div>
+
+        <div class="step-panel" id="panelRisk" hidden>
+          <div class="group">
+            <div class="group-title">Risk inputs</div>
+            <p class="panel-lead">MoRTH persons-killed shares (<code>s_k</code>) refetch V / P / E / C. <code>a</code> <code>b</code> <code>c</code> <code>d</code> update R live with no round-trip. <strong>Save</strong> writes the row. Same <code>window</code> overwrites; a new label stores a comparison row.</p>
+            <table class="form-table">
+              <thead>
+                <tr>
+                  <th>Constant</th>
+                  <th>Value</th>
+                  <th>Why you might change it</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><label for="risk_sk_speeding">s_k speeding</label></td>
+                  <td><input id="risk_sk_speeding" type="number" step="0.01" min="0" value="0" /></td>
+                  <td class="why">MoRTH persons-killed share for speeding</td>
+                </tr>
+                <tr>
+                  <td><label for="risk_sk_wrong_way">s_k wrong_way</label></td>
+                  <td><input id="risk_sk_wrong_way" type="number" step="0.01" min="0" value="0" /></td>
+                  <td class="why">MoRTH persons-killed share for wrong-way</td>
+                </tr>
+                <tr>
+                  <td><label for="risk_sk_red_light">s_k red_light</label></td>
+                  <td><input id="risk_sk_red_light" type="number" step="0.01" min="0" value="0" /></td>
+                  <td class="why">MoRTH persons-killed share for red-light</td>
+                </tr>
+                <tr>
+                  <td><label for="risk_sk_lane_cut">s_k lane_cut</label></td>
+                  <td><input id="risk_sk_lane_cut" type="number" step="0.01" min="0" value="0" /></td>
+                  <td class="why">MoRTH persons-killed share for lane-cut</td>
+                </tr>
+                <tr>
+                  <td><label for="risk_a">a</label></td>
+                  <td><input id="risk_a" type="number" step="0.01" value="0" /></td>
+                  <td class="why">Blend weight on V (video-typed rate)</td>
+                </tr>
+                <tr>
+                  <td><label for="risk_b">b</label></td>
+                  <td><input id="risk_b" type="number" step="0.01" value="0" /></td>
+                  <td class="why">Blend weight on P (inferred / proximity)</td>
+                </tr>
+                <tr>
+                  <td><label for="risk_c">c</label></td>
+                  <td><input id="risk_c" type="number" step="0.01" value="0" /></td>
+                  <td class="why">Blend weight on E (exposure)</td>
+                </tr>
+                <tr>
+                  <td><label for="risk_d">d</label></td>
+                  <td><input id="risk_d" type="number" step="0.01" value="0" /></td>
+                  <td class="why">Blend weight on C (place multipliers)</td>
+                </tr>
+                <tr>
+                  <td><label for="risk_window">window</label></td>
+                  <td><input id="risk_window" type="text" value="this_clip" /></td>
+                  <td class="why">Upsert key. Same string overwrites; a new label (e.g. this_clip_rain) adds a row</td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="form-actions">
+              <button type="button" class="primary" id="saveRiskBtn">Save</button>
+            </div>
+          </div>
+          <div class="group">
+            <div class="group-title">Score</div>
+            <p class="keys" id="riskStatus">Not computed yet.</p>
+            <div class="risk-hero" id="riskHero" hidden>
+              <div class="risk-r">R <span id="riskR">—</span></div>
+              <span class="band-tag" id="riskBand">—</span>
+            </div>
+            <table class="form-table compact" id="riskBreakdown" hidden>
+              <thead>
+                <tr><th>Term</th><th>Value</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>V</td><td id="riskV">—</td></tr>
+                <tr><td>P</td><td id="riskP">—</td></tr>
+                <tr><td>E</td><td id="riskE">—</td></tr>
+                <tr><td>C</td><td id="riskC">—</td></tr>
+                <tr><td>top_types</td><td id="riskTop">—</td></tr>
+                <tr><td>vehicle_count</td><td id="riskVehicles">—</td></tr>
+                <tr><td>window</td><td id="riskWindowOut">—</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="log-dock" id="dockLog">
+      <div class="dock-title">Log</div>
+      <pre id="log" class="log"></pre>
+    </div>
+
+    <footer class="statusbar">
+      <span id="statusText">Ready</span>
+      <span class="status-sep"></span>
+      <span id="statusSource">no source</span>
+      <span class="status-sep"></span>
+      <span id="statusDb">supabase: unknown</span>
+      <div class="progress" id="progress" hidden>
+        <div class="progress-chunk" id="progressBar"></div>
+      </div>
+    </footer>
+  </div>
+
+  <div class="modal" id="aboutModal" hidden>
+    <div class="dialog">
+      <div class="dialog-title">About catris</div>
+      <div class="dialog-body">
+        <p class="about-name">Context-Aware Traffic Risk Intelligence<br />&amp; Planning System</p>
+        <p>1 ingest → 2 homography → 3 lanes → 4 events → 5 risk.</p>
+        <p class="about-meta">catris v0.1 · XFLR5-style workstation</p>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="aboutClose">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
