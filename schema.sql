@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     ts_ms       bigint,
     type        text NOT NULL CHECK (type IN (
                     'wrong_way', 'lane_cut', 'red_light',
-                    'speeding', 'near_miss', 'harsh_brake'
+                    'speeding', 'near_miss', 'harsh_brake', 'weave'
                 )),
     source      text NOT NULL CHECK (source IN ('video', 'inferred')),
     conf        double precision,

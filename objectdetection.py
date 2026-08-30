@@ -713,13 +713,48 @@ def create_input(
     return source_id
 
 
+DB_INCIDENT_TYPES = {
+    "wrong_way", "lane_cut", "red_light",
+    "speeding", "near_miss", "harsh_brake", "weave",
+}
+DB_INCIDENT_SOURCES = {"video", "inferred"}
+
+
+def _jsonable(value):
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if isinstance(value, (np.integer, int)) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, np.ndarray):
+        return _jsonable(value.tolist())
+    return value
+
+
+def _ensure_cleaned_input(client, source_id, place_id):
+    existing = (
+        client.table("cleaned_inputs")
+        .select("source_id")
+        .eq("source_id", source_id)
+        .execute()
+    )
+    if existing.data:
+        return
+    create_input(client, place_id)
+
+
 def save_tracks(
     client,
     tracks,
     source_id,
-    place_id
+    place_id,
+    keep_ids=None,
 ):
 
+    keep_ids = {int(i) for i in (keep_ids or [])}
     rows = []
 
     for track_id, data in tracks.items():
@@ -730,70 +765,83 @@ def save_tracks(
             data["first_t_ms"]
         ) / 1000.0
 
-        if duration_s < 0.4:
+        tid = int(track_id)
+        if duration_s < 0.4 and tid not in keep_ids:
             continue
 
         rows.append({
-
-            "track_id":
-                int(track_id),
-
-            "source_id":
-                source_id,
-
-            "place_id":
-                place_id,
-
-            "class":
-                data["class"],
-
-            "path_json":
-                data["path"],
-
-            "mean_speed_kmh":
-                float(
-                    data["speed_kmh"]
-                ),
-
-            "object_risk":
-                None,
-        })
-
-    if rows:
-
-        (
-            client
-            .table("tracked_objects")
-            .insert(rows)
-            .execute()
-        )
-
-
-def save_incidents(client, incidents, source_id, place_id):
-
-    if not incidents:
-        return
-
-    rows = [
-        {
+            "track_id": tid,
             "source_id": source_id,
             "place_id": place_id,
-            "track_id": int(incident["track_id"]),
-            "ts_ms": incident["ts_ms"],
-            "type": incident["type"],
-            "source": incident["source"],
-            "conf": incident["conf"],
-            "meta_json": incident["meta_json"],
-        }
-        for incident in incidents
-    ]
+            "class": data["class"],
+            "path_json": _jsonable(data["path"]),
+            "mean_speed_kmh": float(data["speed_kmh"]),
+            "object_risk": None,
+        })
 
-    (
-        client
-        .table("incidents")
-        .insert(rows)
-        .execute()
-    )
+    saved_ids = {row["track_id"] for row in rows}
+    if not rows:
+        return saved_ids
+
+    client.table("tracked_objects").upsert(
+        rows, on_conflict="source_id,track_id"
+    ).execute()
+    return saved_ids
+
+
+def save_incidents(client, incidents, source_id, place_id, saved_track_ids):
+
+    if not incidents:
+        return 0
+
+    rows = []
+    skipped = []
+    for incident in incidents:
+        itype = str(incident.get("type") or "")
+        isource = str(incident.get("source") or "")
+        tid = int(incident["track_id"])
+        if itype not in DB_INCIDENT_TYPES:
+            skipped.append((itype, "type not in schema"))
+            continue
+        if isource not in DB_INCIDENT_SOURCES:
+            skipped.append((itype, f"bad source {isource}"))
+            continue
+        if tid not in saved_track_ids:
+            skipped.append((itype, f"track {tid} not saved"))
+            continue
+        rows.append({
+            "source_id": source_id,
+            "place_id": place_id,
+            "track_id": tid,
+            "ts_ms": int(incident["ts_ms"]),
+            "type": itype,
+            "source": isource,
+            "conf": float(incident.get("conf") if incident.get("conf") is not None else 1.0),
+            "meta_json": _jsonable(incident.get("meta_json")),
+        })
+
+    if skipped:
+        print(f"Skipped {len(skipped)} incident(s) before insert: {skipped[:8]}")
+
+    if not rows:
+        return 0
+
+    try:
+        client.table("incidents").insert(rows).execute()
+        print(f"Inserted {len(rows)} incident(s) into incidents.")
+        return len(rows)
+    except Exception as batch_err:
+        print(f"Batch incident insert failed ({batch_err}); inserting row by row.")
+
+    ok = 0
+    for row in rows:
+        try:
+            client.table("incidents").insert(row).execute()
+            ok += 1
+        except Exception as row_err:
+            print(f"  skip {row['type']} track={row['track_id']}: {row_err}")
+    print(f"Inserted {ok}/{len(rows)} incident(s) row-by-row.")
+    return ok
 
 
 # ============================================================
@@ -1595,36 +1643,42 @@ def main():
                     "stop_line_json": STOP_LINE,
                 }
             ).eq("place_id", place_id).execute()
+            _ensure_cleaned_input(client, source_id, place_id)
 
-        save_tracks(
+        keep_ids = {int(inc["track_id"]) for inc in incidents}
 
+        # Re-runs: incidents reference tracks, so wipe children first.
+        client.table("incidents").delete().eq("source_id", source_id).execute()
+        client.table("tracked_objects").delete().eq("source_id", source_id).execute()
+
+        saved_ids = save_tracks(
             client,
-
             tracks,
-
             source_id,
-
-            place_id
+            place_id,
+            keep_ids=keep_ids,
         )
 
-        save_incidents(
+        inserted = save_incidents(
             client,
             incidents,
             source_id,
-            place_id
+            place_id,
+            saved_ids,
         )
 
-        print(
-            f"place_id: {place_id}"
-        )
+        print(f"place_id: {place_id}")
+        print(f"source_id: {source_id}")
+        print(f"incidents local: {len(incidents)}  db: {inserted}")
 
-        print(
-            f"source_id: {source_id}"
-        )
-
-        print(
-            f"incidents: {len(incidents)}"
-        )
+        ingest_path = os.path.join(os.path.dirname(VIDEO_PATH), "ingest.json")
+        if os.path.isfile(ingest_path):
+            with open(ingest_path, encoding="utf-8") as handle:
+                rec = json.load(handle)
+            rec["place_id"] = place_id
+            rec["source_id"] = source_id
+            with open(ingest_path, "w", encoding="utf-8") as handle:
+                json.dump(rec, handle, indent=2)
 
     except Exception as e:
 

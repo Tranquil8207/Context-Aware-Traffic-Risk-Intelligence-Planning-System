@@ -21,8 +21,12 @@ a DB round-trip on every change:
     one-shot callers that don't need the live-recompute split.
 """
 
+import json
 import math
+from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent
 
 VIDEO_TYPES = ("speeding", "wrong_way", "red_light", "lane_cut")
 INFERRED_TYPES = ("near_miss", "harsh_brake", "weave")
@@ -42,24 +46,51 @@ def compute_weights(s_k: dict[str, float]) -> dict[str, float]:
     return {k: v / total for k, v in logs.items()}
 
 
+def _local_incidents(source_id: str) -> list[dict[str, Any]]:
+    path = ROOT / "data" / "sources" / source_id / "incidents.json"
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
 def _incident_counts(
     client, place_id: int, source_id: str, source: str, use_conf: bool
 ) -> dict[str, float]:
-    response = (
-        client.table("incidents")
-        .select("type, conf")
-        .eq("place_id", place_id)
-        .eq("source_id", source_id)
-        .eq("source", source)
-        .execute()
-    )
-
     counts: dict[str, float] = {}
-    for row in response.data:
+    try:
+        response = (
+            client.table("incidents")
+            .select("type, conf")
+            .eq("place_id", place_id)
+            .eq("source_id", source_id)
+            .eq("source", source)
+            .execute()
+        )
+        rows = response.data or []
+    except Exception:
+        rows = []
+
+    for row in rows:
         key = row["type"]
         weight = float(row["conf"]) if use_conf else 1.0
         counts[key] = counts.get(key, 0.0) + weight
 
+    if counts:
+        return counts
+
+    # UI writes incidents.json even when the Supabase insert fails.
+    for incident in _local_incidents(source_id):
+        if str(incident.get("source") or "") != source:
+            continue
+        key = str(incident.get("type") or "")
+        if not key:
+            continue
+        weight = float(incident["conf"]) if use_conf and incident.get("conf") is not None else 1.0
+        counts[key] = counts.get(key, 0.0) + weight
     return counts
 
 
@@ -110,14 +141,17 @@ def compute_metrics(
 
     # Step 6 -- E (distinct tracked vehicles / second). duration_s is already
     # wall-clock seconds from the clip; do not convert it again.
-    tracks_response = (
-        client.table("tracked_objects")
-        .select("track_id")
-        .eq("place_id", place_id)
-        .eq("source_id", source_id)
-        .execute()
-    )
-    vehicle_count = len({row["track_id"] for row in tracks_response.data})
+    try:
+        tracks_response = (
+            client.table("tracked_objects")
+            .select("track_id")
+            .eq("place_id", place_id)
+            .eq("source_id", source_id)
+            .execute()
+        )
+        vehicle_count = len({row["track_id"] for row in (tracks_response.data or [])})
+    except Exception:
+        vehicle_count = 0
     T_s = max(float(duration_s), 1.0)
     E = vehicle_count / T_s
 
