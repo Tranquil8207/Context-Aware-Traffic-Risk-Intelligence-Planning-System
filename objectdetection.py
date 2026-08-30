@@ -1,8 +1,9 @@
 import os
-import json
 import cv2
-import psycopg2
+from supabase import Client
 from ultralytics import YOLO
+
+from supabase_client import get_client
 
 
 # ============================================================
@@ -16,13 +17,6 @@ OUTPUT_VIDEO = "stage1_tracking.mp4"
 
 CONFIDENCE = 0.35
 MIN_TRACK_TIME_S = 0.4
-
-# PostgreSQL connection
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "traffic")
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
 # Junction metadata
 LAT = None
@@ -58,143 +52,70 @@ CLASS_MAP = {
 # DATABASE
 # ============================================================
 
-def connect_db():
-    return psycopg2.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-    )
+def create_place(client: Client) -> int:
+    # Supabase encodes plain dicts/lists to jsonb columns itself; no
+    # json.dumps or ::jsonb cast needed.
+    row = {
+        "lat": LAT,
+        "lng": LNG,
+        "road_kind": ROAD_KIND,
+        "speed_limit_kmh": SPEED_LIMIT_KMH,
+        "ref_length_m": REF_LENGTH_M,
+        "ref_points_json": REF_POINTS,
+        "stop_line_json": STOP_LINE,
+        "legal_heading": LEGAL_HEADING,
+        "lanes_json": LANES,
+        "has_signal": HAS_SIGNAL,
+        "city_prior": CITY_PRIOR,
+        "is_night": IS_NIGHT,
+        "is_rain": IS_RAIN,
+        "is_rush": IS_RUSH,
+    }
+
+    response = client.table("places").insert(row).execute()
+    return response.data[0]["place_id"]
 
 
-def create_place(conn):
-    query = """
-        INSERT INTO places (
-            lat,
-            lng,
-            road_kind,
-            speed_limit_kmh,
-            ref_length_m,
-            ref_points_json,
-            stop_line_json,
-            legal_heading,
-            lanes_json,
-            has_signal,
-            city_prior,
-            is_night,
-            is_rain,
-            is_rush
-        )
-        VALUES (
-            %s, %s, %s, %s, %s,
-            %s::jsonb,
-            %s::jsonb,
-            %s,
-            %s::jsonb,
-            %s, %s, %s, %s, %s
-        )
-        RETURNING place_id;
-    """
-
-    values = (
-        LAT,
-        LNG,
-        ROAD_KIND,
-        SPEED_LIMIT_KMH,
-        REF_LENGTH_M,
-        json.dumps(REF_POINTS) if REF_POINTS is not None else None,
-        json.dumps(STOP_LINE) if STOP_LINE is not None else None,
-        LEGAL_HEADING,
-        json.dumps(LANES) if LANES is not None else None,
-        HAS_SIGNAL,
-        CITY_PRIOR,
-        IS_NIGHT,
-        IS_RAIN,
-        IS_RUSH,
-    )
-
-    with conn.cursor() as cur:
-        cur.execute(query, values)
-        place_id = cur.fetchone()[0]
-
-    conn.commit()
-    return place_id
-
-
-def create_input(conn, place_id):
-    query = """
-        INSERT INTO cleaned_inputs (
-            source_id,
-            kind,
-            place_id,
-            file_name,
-            clock_start,
-            clock_note,
-            notes
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s);
-    """
-
+def create_input(client: Client, place_id: int) -> str:
     source_id = os.path.basename(VIDEO_PATH)
 
-    values = (
-        source_id,
-        "video",
-        place_id,
-        os.path.basename(VIDEO_PATH),
-        None,
-        "demo-time",
-        "Delhi-Meerut Expressway traffic video",
-    )
+    row = {
+        "source_id": source_id,
+        "kind": "video",
+        "place_id": place_id,
+        "file_name": os.path.basename(VIDEO_PATH),
+        "clock_start": None,
+        "clock_note": "demo-time",
+        "notes": "Delhi-Meerut Expressway traffic video",
+    }
 
-    with conn.cursor() as cur:
-        cur.execute(query, values)
-
-    conn.commit()
+    client.table("cleaned_inputs").insert(row).execute()
     return source_id
 
 
-def save_tracks(conn, tracks, source_id, place_id):
-    query = """
-        INSERT INTO tracked_objects (
-            track_id,
-            source_id,
-            place_id,
-            class,
-            path_json,
-            plate_text,
-            mean_speed_kmh,
-            object_risk
-        )
-        VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s);
-    """
+def save_tracks(client: Client, tracks: dict, source_id: str, place_id: int) -> None:
+    rows = []
 
-    with conn.cursor() as cur:
-        for track_id, data in tracks.items():
+    for track_id, data in tracks.items():
+        duration_s = (data["last_t_ms"] - data["first_t_ms"]) / 1000.0
 
-            duration_s = (
-                data["last_t_ms"] - data["first_t_ms"]
-            ) / 1000.0
+        if duration_s < MIN_TRACK_TIME_S:
+            continue
 
-            if duration_s < MIN_TRACK_TIME_S:
-                continue
+        rows.append({
+            # track_id/x/y arrive as numpy ints from YOLO; cast to plain
+            # Python int so the request body can be JSON-encoded.
+            "track_id": int(track_id),
+            "source_id": source_id,
+            "place_id": place_id,
+            "class": data["class"],
+            "path_json": data["path"],
+            "mean_speed_kmh": None,
+            "object_risk": None,
+        })
 
-            cur.execute(
-                query,
-                (
-                    track_id,
-                    source_id,
-                    place_id,
-                    data["class"],
-                    json.dumps(data["path"]),
-                    "",
-                    None,
-                    None,
-                ),
-            )
-
-    conn.commit()
+    if rows:
+        client.table("tracked_objects").insert(rows).execute()
 
 
 # ============================================================
@@ -366,28 +287,24 @@ def main():
     # DATABASE
     # --------------------------------------------------------
 
-    conn = connect_db()
+    client = get_client()
 
-    try:
-        place_id = create_place(conn)
+    place_id = create_place(client)
 
-        source_id = create_input(
-            conn,
-            place_id,
-        )
+    source_id = create_input(
+        client,
+        place_id,
+    )
 
-        save_tracks(
-            conn,
-            tracks,
-            source_id,
-            place_id,
-        )
+    save_tracks(
+        client,
+        tracks,
+        source_id,
+        place_id,
+    )
 
-        print(f"place_id: {place_id}")
-        print(f"source_id: {source_id}")
-
-    finally:
-        conn.close()
+    print(f"place_id: {place_id}")
+    print(f"source_id: {source_id}")
 
     # --------------------------------------------------------
     # TRACK SUMMARY
