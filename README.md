@@ -43,5 +43,3 @@ Supabase project, not from this repo.
 
 Teammates: use `STAGE_1_STARTER.md`, `STAGE_2_STARTER.md`, etc. for your stage.
 This README is not a spec.
-
-DB password - Rag398S0TGGpmhFC
