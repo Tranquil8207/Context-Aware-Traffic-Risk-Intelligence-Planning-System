@@ -1007,7 +1007,6 @@
   }
 
   function fillRiskForm(saved, riskRow) {
-    resetRiskForm();
     const input = saved || {};
     const sK = input.s_k || {};
     RISK_SK_KEYS.forEach((key) => {
@@ -1088,42 +1087,48 @@
   }
 
   function renderRiskResult(row, statusText) {
+    const table = $("riskBreakdown");
     if (!row) {
       $("riskStatus").textContent = statusText || "Not computed yet.";
       $("riskHero").hidden = true;
-      $("riskBreakdown").hidden = true;
+      if (table) table.hidden = true;
       return;
     }
-    $("riskStatus").textContent = statusText || "Live.";
-    $("riskHero").hidden = false;
-    $("riskBreakdown").hidden = false;
-    $("riskR").textContent = fmtRisk(row.R);
-    const band = row.band || "—";
-    const tag = $("riskBand");
-    tag.textContent = band;
-    tag.className = "band-tag band-" + band;
     const w = liveWeights();
     const V = Number(row.V) || 0;
     const P = Number(row.P) || 0;
     const E = Number(row.E) || 0;
     const C = Number(row.C) || 0;
-    const aV = row.aV != null ? row.aV : w.a * V;
-    const bP = row.bP != null ? row.bP : w.b * P;
-    const cE = row.cE != null ? row.cE : w.c * E;
-    const dC = row.dC != null ? row.dC : w.d * C;
-    const raw = row.R_raw != null ? row.R_raw : aV + bP + cE + dC;
-    $("riskV").textContent = fmtRisk(V);
-    $("riskP").textContent = fmtRisk(P);
-    $("riskE").textContent = fmtRisk(E);
-    $("riskC").textContent = fmtRisk(C);
-    if ($("riskVa")) $("riskVa").textContent = fmtRisk(aV);
-    if ($("riskPb")) $("riskPb").textContent = fmtRisk(bP);
-    if ($("riskEc")) $("riskEc").textContent = fmtRisk(cE);
-    if ($("riskCd")) $("riskCd").textContent = fmtRisk(dC);
-    if ($("riskRaw")) $("riskRaw").textContent = fmtRisk(raw);
-    $("riskTop").textContent = row.top_types || "—";
-    $("riskVehicles").textContent = fmtRisk(row.vehicle_count);
-    $("riskWindowOut").textContent = row.window || "—";
+    const aV = row.aV != null ? Number(row.aV) : w.a * V;
+    const bP = row.bP != null ? Number(row.bP) : w.b * P;
+    const cE = row.cE != null ? Number(row.cE) : w.c * E;
+    const dC = row.dC != null ? Number(row.dC) : w.d * C;
+    const raw = row.R_raw != null ? Number(row.R_raw) : aV + bP + cE + dC;
+    $("riskStatus").textContent = statusText || "Live.";
+    $("riskHero").hidden = false;
+    $("riskR").textContent = fmtRisk(row.R);
+    const band = row.band || "—";
+    const tag = $("riskBand");
+    tag.textContent = band;
+    tag.className = "band-tag band-" + band;
+    if (!table) return;
+    table.hidden = false;
+    const body = table.tBodies[0] || table.createTBody();
+    const lines = [
+      ["V", fmtRisk(V)],
+      ["a × V", fmtRisk(aV)],
+      ["P", fmtRisk(P)],
+      ["b × P", fmtRisk(bP)],
+      ["E", fmtRisk(E)],
+      ["c × E", fmtRisk(cE)],
+      ["C", fmtRisk(C)],
+      ["d × C", fmtRisk(dC)],
+      ["aV+bP+cE+dC", fmtRisk(raw)],
+      ["top_types", row.top_types || "—"],
+      ["vehicle_count", fmtRisk(row.vehicle_count)],
+      ["window", row.window || "—"],
+    ];
+    body.innerHTML = lines.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
   }
 
   function applyLiveRisk(statusText) {
@@ -1377,21 +1382,16 @@
   $("saveEventsBtn").addEventListener("click", () => saveEvents().catch((err) => log(String(err))));
   $("runIdentifyBtn").addEventListener("click", () => runIdentify().catch((err) => log(String(err))));
   $("saveRiskBtn").addEventListener("click", () => saveRisk().catch((err) => log(String(err))));
-  const riskPanel = $("panelRisk");
-  if (riskPanel) {
-    riskPanel.addEventListener("input", (ev) => {
-      const id = ev.target && ev.target.id;
-      if (!id) return;
-      if (id.indexOf("risk_sk_") === 0) onSkChanged();
-      else if (id === "risk_a" || id === "risk_b" || id === "risk_c" || id === "risk_d" || id === "risk_window") onBlendChanged();
-    });
-    riskPanel.addEventListener("change", (ev) => {
-      const id = ev.target && ev.target.id;
-      if (!id) return;
-      if (id.indexOf("risk_sk_") === 0) onSkChanged();
-      else if (id === "risk_a" || id === "risk_b" || id === "risk_c" || id === "risk_d" || id === "risk_window") onBlendChanged();
-    });
+  function bindRiskInput(id, handler) {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener("input", handler);
+    el.addEventListener("change", handler);
+    el.addEventListener("keyup", handler);
   }
+  RISK_SK_KEYS.forEach((key) => bindRiskInput("risk_sk_" + key, onSkChanged));
+  RISK_WEIGHT_KEYS.forEach((key) => bindRiskInput("risk_" + key, onBlendChanged));
+  bindRiskInput("risk_window", onBlendChanged);
   $("prevFrameBtn").addEventListener("click", () => {
     if (state.frameIndex > 0) loadFrame(state.frameIndex - 1);
   });
