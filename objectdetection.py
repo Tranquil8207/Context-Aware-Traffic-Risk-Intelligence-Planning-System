@@ -821,7 +821,7 @@ def check_weave(track, track_id, t_ms, incidents):
         track["fired"]["weave"] = False
 
 
-def check_near_miss(frame_positions, t_ms, incidents, streaks):
+def check_near_miss(frame_positions, tracks, t_ms, incidents, streaks):
     ids = list(frame_positions.keys())
 
     for i in range(len(ids)):
@@ -834,6 +834,9 @@ def check_near_miss(frame_positions, t_ms, incidents, streaks):
 
             if gap < NEAR_MISS_GAP_M:
                 streaks[key] = streaks.get(key, 0) + 1
+                if streaks[key] > NEAR_MISS_MIN_FRAMES:
+                    tracks[a]["fired"]["near_miss"] = True
+                    tracks[b]["fired"]["near_miss"] = True
                 if streaks[key] == NEAR_MISS_MIN_FRAMES + 1:
                     emit_incident(
                         incidents, a, t_ms, "near_miss", "inferred",
@@ -841,6 +844,8 @@ def check_near_miss(frame_positions, t_ms, incidents, streaks):
                     )
             else:
                 streaks[key] = 0
+                tracks[a]["fired"]["near_miss"] = False
+                tracks[b]["fired"]["near_miss"] = False
 
 
 # ============================================================
@@ -1429,6 +1434,7 @@ def main():
                             "speeding_under": False,
                             "harsh_brake": False,
                             "weave": False,
+                            "near_miss": False,
                         },
                     }
 
@@ -1693,7 +1699,48 @@ def main():
                     1
                 )
 
-        check_near_miss(frame_positions, t_ms, incidents, near_miss_streaks)
+                # ====================================================
+                # EVENT OVERLAY
+                # ====================================================
+
+                event_labels = {
+                    "wrong_way": "WRONG WAY",
+                    "speeding_over": "SPEEDING+",
+                    "speeding_under": "SPEEDING-",
+                    "harsh_brake": "HARSH BRAKE",
+                    "weave": "WEAVE",
+                    "near_miss": "NEAR MISS",
+                }
+
+                active_events = [
+                    label
+                    for key, label in event_labels.items()
+                    if track["fired"].get(key)
+                ]
+
+                if active_events:
+
+                    cv2.putText(
+
+                        frame,
+
+                        " | ".join(active_events),
+
+                        (
+                            x + 10,
+                            y + 50
+                        ),
+
+                        cv2.FONT_HERSHEY_SIMPLEX,
+
+                        0.5,
+
+                        (0, 0, 255),
+
+                        2
+                    )
+
+        check_near_miss(frame_positions, tracks, t_ms, incidents, near_miss_streaks)
 
         # ====================================================
         # GLOBAL DISPLAY
