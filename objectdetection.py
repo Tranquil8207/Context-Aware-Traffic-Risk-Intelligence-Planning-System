@@ -28,7 +28,7 @@ from lib.models import get_net  # noqa: E402
 # CONFIGURATION
 # ============================================================
 
-VIDEO_PATH = "istockphoto-1282097666-640_adpp_is.mp4"
+VIDEO_PATH = "istockphoto-1282097660-640_adpp_is.mp4"
 
 # Your existing object detector
 OBJECT_MODEL_PATH = "yolo26m.pt"
