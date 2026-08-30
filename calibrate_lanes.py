@@ -49,7 +49,7 @@ import numpy as np
 
 from calibration_io import CALIBRATION_PATH, load_calibration, update_calibration
 
-DEFAULT_VIDEO_PATH = "istockphoto-1282097660-640_adpp_is.mp4"
+DEFAULT_VIDEO_PATH = "YTDown.com_YouTube_Indian-Traffic-Vehicles-Highway-Footage-_Media_tQnVX3nj3Co_002_720p (1).mp4"
 
 LANE_COLORS = [
     (255, 0, 0),
