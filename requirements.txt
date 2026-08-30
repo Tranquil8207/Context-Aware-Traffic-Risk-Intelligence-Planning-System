@@ -4,3 +4,10 @@ fastapi>=0.115.0
 uvicorn>=0.32.0
 supabase>=2.9.0
 python-dotenv>=1.0.0
+
+# Required by the vendored YOLOP/ lane-detection repo (objectdetection.py
+# imports torch/torchvision/numpy directly, and YOLOP's lib.config needs yacs)
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+yacs>=0.1.8

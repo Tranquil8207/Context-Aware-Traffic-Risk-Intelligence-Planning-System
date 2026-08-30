@@ -10,6 +10,7 @@ import torchvision.transforms as transforms
 from supabase import Client
 from ultralytics import YOLO
 
+from calibration_io import load_calibration
 from supabase_client import get_client
 
 # The YOLOP repo has no top-level `YOLOP` package to import from — its
@@ -43,15 +44,38 @@ CONFIDENCE = 0.35
 # ------------------------------------------------------------
 # ROAD / CAMERA ASSUMPTIONS
 # ------------------------------------------------------------
+#
+# Loaded from calibration.json if it exists (written by
+# calibrate_homography.py / calibrate_lanes.py), so recalibrating never
+# requires editing this file. The literal values below are the fallback
+# used only if calibration.json is missing or incomplete -- currently the
+# last known-good calibration from this project's own history.
 
-LANE_WIDTH_M = 3.5
+_CALIBRATION = load_calibration()
+_HOMOGRAPHY_CAL = _CALIBRATION.get("homography", {})
+
+HOMOGRAPHY_SRC = _HOMOGRAPHY_CAL.get("src", [
+    [142, 431],   # near-left
+    [697, 431],   # near-right
+    [294, 163],   # far-left
+    [438, 163],   # far-right
+])
+
+LANE_WIDTH_M = _HOMOGRAPHY_CAL.get("lane_width_m", 10.5)
+
+# LANE_WIDTH_M is the combined width of NUM_LANES equal-width lanes, used to
+# calibrate the homography. Each individual lane's width for lane-number
+# classification is LANE_WIDTH_M / NUM_LANES. Only valid if the lanes are
+# uniform and parallel across the calibrated stretch of road.
+NUM_LANES = 3
+SINGLE_LANE_WIDTH_M = LANE_WIDTH_M / NUM_LANES
 
 # Engineering assumption for high-mounted expressway CCTV.
 # NOT a verified DME camera specification.
 CAMERA_HEIGHT_M = 8.0
 
 # Used for homography calibration.
-REFERENCE_DISTANCE_M = 20.0
+REFERENCE_DISTANCE_M = _HOMOGRAPHY_CAL.get("reference_distance_m", 120.0)
 
 SPEED_SMOOTHING_FRAMES = 5
 
@@ -69,12 +93,22 @@ ROAD_KIND = "expressway"
 
 SPEED_LIMIT_KMH = None
 
-REF_LENGTH_M = LANE_WIDTH_M
+REF_LENGTH_M = SINGLE_LANE_WIDTH_M
 
-REF_POINTS = None
+# The pixel points actually used above, whether from calibration.json or
+# the fallback -- this is what places.ref_points_json records.
+REF_POINTS = HOMOGRAPHY_SRC
+
 STOP_LINE = None
 LEGAL_HEADING = None
-LANES = None
+
+# Loaded from calibration.json's "lanes" section if present (written by
+# calibrate_lanes.py); falls back to the last known-good boxing otherwise.
+LANES = _CALIBRATION.get("lanes", [
+    {"lane": 1, "polygon": [[150, 431], [334, 431], [346, 126], [314, 127], [150, 430]]},
+    {"lane": 2, "polygon": [[338, 431], [350, 127], [376, 127], [516, 431], [338, 431]]},
+    {"lane": 3, "polygon": [[378, 127], [521, 430], [694, 431], [404, 127], [380, 127]]},
+])
 
 HAS_SIGNAL = 0
 CITY_PRIOR = 1.0
@@ -200,50 +234,24 @@ class YOLOPLaneDetector:
 # HOMOGRAPHY
 # ============================================================
 
-def create_homography(width, height):
+def create_homography():
 
     r"""
-    Manual calibration.
+    Four image points (near-left, near-right, far-left, far-right) mapped
+    to a known real-world rectangle on the road:
 
-    IMPORTANT:
-    These values MUST eventually be tuned for your actual video.
+        near-left  = (0, 0)
+        near-right = (LANE_WIDTH_M, 0)
+        far-left   = (0, REFERENCE_DISTANCE_M)
+        far-right  = (LANE_WIDTH_M, REFERENCE_DISTANCE_M)
 
-    Four image points:
-
-        TL -------- TR
-         \          /
-          \        /
-           \      /
-            BL -- BR
-
-    They represent two points across the road
-    at two different longitudinal positions.
-
-    World coordinates:
-
-        TL = (0, 0)
-        TR = (3.5, 0)
-
-        BL = (0, 20)
-        BR = (3.5, 20)
+    HOMOGRAPHY_SRC / LANE_WIDTH_M / REFERENCE_DISTANCE_M come from
+    calibration.json (see the CONFIGURATION section) -- re-run
+    calibrate_homography.py if the camera or video ever changes, rather
+    than editing values here.
     """
 
-    # --------------------------------------------------------
-    # STARTING VALUES
-    # --------------------------------------------------------
-    #
-    # These are proportional coordinates, NOT guaranteed
-    # correct for your video.
-    #
-    # You MUST tune these once you see your actual frame.
-    # --------------------------------------------------------
-
-    src = np.float32([
-        [width * 0.35, height * 0.70],   # TL
-        [width * 0.65, height * 0.70],   # TR
-        [width * 0.48, height * 0.50],   # BL
-        [width * 0.52, height * 0.50],   # BR
-    ])
+    src = np.float32(HOMOGRAPHY_SRC)
 
     dst = np.float32([
         [0.0, 0.0],
@@ -295,6 +303,39 @@ def pixel_to_world(x, y):
     )
 
     return X, Y
+
+
+# ============================================================
+# PIXEL -> LANE NUMBER
+# ============================================================
+#
+# LANES is manually boxed per video via calibrate_lanes.py, as a list of
+# {"lane": n, "polygon": [[x, y], ...]} pixel-space polygons -- one per
+# lane, drawn by hand so curves/merges don't need special-case code.
+# LANE_POLYGONS caches the parsed numpy polygons; built once in main().
+
+LANE_POLYGONS = None
+
+
+def build_lane_polygons(lanes):
+    if not lanes:
+        return None
+
+    return [
+        (entry["lane"], np.array(entry["polygon"], dtype=np.int32))
+        for entry in lanes
+    ]
+
+
+def get_lane_number(x, y):
+    if LANE_POLYGONS is None:
+        return None
+
+    for lane_number, polygon in LANE_POLYGONS:
+        if cv2.pointPolygonTest(polygon, (float(x), float(y)), False) >= 0:
+            return lane_number
+
+    return None
 
 
 # ============================================================
@@ -444,6 +485,42 @@ def draw_lane_points(
             2,
             (255, 255, 0),
             -1
+        )
+
+    return frame
+
+
+LANE_POLYGON_COLORS = [
+    (255, 0, 0),
+    (0, 165, 255),
+    (255, 0, 255),
+    (0, 255, 0),
+    (255, 255, 0),
+    (0, 0, 255),
+]
+
+
+def draw_lane_polygons(frame, lane_polygons):
+    """Outline manually-boxed lanes (from calibrate_lanes.py) for visual
+    verification that they still line up with the road."""
+
+    if not lane_polygons:
+        return frame
+
+    for i, (lane_number, polygon) in enumerate(lane_polygons):
+        color = LANE_POLYGON_COLORS[i % len(LANE_POLYGON_COLORS)]
+
+        cv2.polylines(frame, [polygon], True, color, 2)
+
+        centroid = polygon.mean(axis=0).astype(int)
+        cv2.putText(
+            frame,
+            f"Lane {lane_number}",
+            (int(centroid[0]), int(centroid[1])),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2,
         )
 
     return frame
@@ -711,6 +788,7 @@ def save_tracks(
 def main():
 
     global HOMOGRAPHY
+    global LANE_POLYGONS
 
     # --------------------------------------------------------
     # CHECK VIDEO
@@ -781,10 +859,20 @@ def main():
     # HOMOGRAPHY
     # --------------------------------------------------------
 
-    HOMOGRAPHY = create_homography(
-        width,
-        height
-    )
+    HOMOGRAPHY = create_homography()
+
+    # --------------------------------------------------------
+    # LANES
+    # --------------------------------------------------------
+
+    LANE_POLYGONS = build_lane_polygons(LANES)
+
+    if LANE_POLYGONS is None:
+        print(
+            "\nLANES not set -- lane numbers will be recorded as None. "
+            "Run calibrate_lanes.py to save lane polygons into "
+            "calibration.json."
+        )
 
     # --------------------------------------------------------
     # YOLOP
@@ -886,6 +974,11 @@ def main():
         frame = draw_lane_points(
             frame,
             lane_points
+        )
+
+        frame = draw_lane_polygons(
+            frame,
+            LANE_POLYGONS
         )
 
         # ====================================================
@@ -1016,6 +1109,12 @@ def main():
                 )
 
                 # ------------------------------------------------
+                # LANE NUMBER (pixel-space, from calibrate_lanes.py)
+                # ------------------------------------------------
+
+                lane_number = get_lane_number(x, y)
+
+                # ------------------------------------------------
                 # INITIALIZE TRACK
                 # ------------------------------------------------
 
@@ -1070,6 +1169,9 @@ def main():
                 # PIXEL PATH
                 # ------------------------------------------------
 
+                # path entries are [t_ms, x, y, lane] -- lane folded in here
+                # rather than a parallel structure, since path_json is
+                # already the array column this data belongs in.
                 track[
                     "path"
                 ].append(
@@ -1077,7 +1179,8 @@ def main():
                     [
                         t_ms,
                         int(x),
-                        int(y)
+                        int(y),
+                        lane_number
                     ]
 
                 )
@@ -1246,6 +1349,36 @@ def main():
 
                         1
                     )
+
+                # ====================================================
+                # LANE NUMBER
+                # ====================================================
+
+                lane_text = (
+                    f"Lane:{lane_number}"
+                    if lane_number is not None
+                    else "Lane:-"
+                )
+
+                cv2.putText(
+
+                    frame,
+
+                    lane_text,
+
+                    (
+                        x + 10,
+                        y + 35
+                    ),
+
+                    cv2.FONT_HERSHEY_SIMPLEX,
+
+                    0.45,
+
+                    (0, 200, 255),
+
+                    1
+                )
 
         # ====================================================
         # GLOBAL DISPLAY
