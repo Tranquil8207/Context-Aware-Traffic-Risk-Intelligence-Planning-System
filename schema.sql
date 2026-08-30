@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS net_risk_scores (
     "R"           double precision,
     band          text,
     top_types     text,
-    vehicle_count integer
+    vehicle_count integer,
+    UNIQUE (place_id, "window")
 );
 
 CREATE TABLE IF NOT EXISTS scenarios (
