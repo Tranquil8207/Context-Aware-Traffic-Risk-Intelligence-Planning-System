@@ -144,11 +144,6 @@ def main():
     print(f"Video: {width} x {height}")
     print(f"FPS: {fps:.2f}")
 
-    if width != 1920 or height != 1080:
-        raise RuntimeError(
-            f"Expected 1920x1080, got {width}x{height}"
-        )
-
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
     out = cv2.VideoWriter(
