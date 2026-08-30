@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from risk_score import compute_metrics, compute_risk
+from risk_score import combine_risk, compute_metrics, save_risk_row
 from source_io import EVENT_DEFAULTS, RISK_ABCD_DEFAULTS, RISK_S_K_DEFAULTS, merge_events
 
 ROOT = Path(__file__).resolve().parent
@@ -556,21 +556,30 @@ def save_risk(source_id: str, body: RiskIn) -> dict[str, Any]:
     from supabase_client import get_client
 
     client = get_client()
-    row = compute_risk(
-        client,
-        place_id,
-        source_id,
-        duration_s,
-        body.s_k,
-        body.a,
-        body.b,
-        body.c,
-        body.d,
-        window=body.window,
-    )
+    try:
+        metrics = compute_metrics(client, place_id, source_id, duration_s, body.s_k)
+        combined = combine_risk(metrics, body.a, body.b, body.c, body.d)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not compute risk: {exc}") from exc
 
-    record["risk"] = row
+    row = {
+        **combined,
+        "place_id": place_id,
+        "window": body.window,
+    }
+    try:
+        saved = save_risk_row(client, place_id, body.window, combined)
+        row.update(saved)
+        record.pop("risk_db_error", None)
+    except Exception as exc:
+        record["risk_db_error"] = str(exc)
+
+    record["risk"] = {
+        k: v for k, v in row.items() if k not in {"R_raw", "db_warning"}
+    }
     record["stage"] = "risk"
+    if record.get("risk_db_error"):
+        row["db_warning"] = record["risk_db_error"]
     _write_ingest(source_id, record)
     return row
 

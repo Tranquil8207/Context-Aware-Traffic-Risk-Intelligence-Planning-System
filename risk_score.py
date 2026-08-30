@@ -154,7 +154,8 @@ def combine_risk(metrics: dict[str, Any], a: float, b: float, c: float, d: float
     video_counts = metrics["video_counts"]
     inferred_counts = metrics["inferred_counts"]
 
-    R = max(0.0, min(100.0, a * V + b * P + c * E + d * C))
+    R_raw = a * V + b * P + c * E + d * C
+    R = max(0.0, min(100.0, R_raw))
     band = "cold" if R < 40 else "warm" if R < 70 else "hot"
 
     contributions = {
@@ -174,6 +175,7 @@ def combine_risk(metrics: dict[str, Any], a: float, b: float, c: float, d: float
         "E": E,
         "C": C,
         "R": R,
+        "R_raw": R_raw,
         "band": band,
         "top_types": top_types,
         "vehicle_count": metrics["vehicle_count"],
@@ -181,14 +183,36 @@ def combine_risk(metrics: dict[str, Any], a: float, b: float, c: float, d: float
 
 
 def save_risk_row(client, place_id: int, window: str, row: dict[str, Any]) -> dict[str, Any]:
-    """Step 9: write, keyed on (place_id, window)."""
+    """Step 9: write, keyed on (place_id, window).
 
-    full_row = {"place_id": place_id, "window": window, **row}
-    (
-        client.table("net_risk_scores")
-        .upsert(full_row, on_conflict="place_id,window")
-        .execute()
-    )
+    Upsert needs a unique (place_id, window) constraint. schema.sql does not
+    declare one, so if PostgREST rejects ON CONFLICT we delete+insert instead.
+    Extra keys like R_raw are stripped — they are UI-only.
+    """
+
+    full_row = {
+        "place_id": place_id,
+        "window": window,
+        "V": float(row["V"]),
+        "P": float(row["P"]),
+        "E": float(row["E"]),
+        "C": float(row["C"]),
+        "R": float(row["R"]),
+        "band": row["band"],
+        "top_types": row.get("top_types"),
+        "vehicle_count": int(row.get("vehicle_count") or 0),
+    }
+    table = client.table("net_risk_scores")
+    try:
+        table.upsert(full_row, on_conflict="place_id,window").execute()
+    except Exception:
+        (
+            table.delete()
+            .eq("place_id", place_id)
+            .eq("window", window)
+            .execute()
+        )
+        table.insert(full_row).execute()
     return full_row
 
 

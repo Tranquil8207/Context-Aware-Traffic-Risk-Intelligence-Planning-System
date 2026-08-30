@@ -1058,7 +1058,8 @@
     const P = Number(metrics.P) || 0;
     const E = Number(metrics.E) || 0;
     const C = Number(metrics.C) || 0;
-    const R = Math.max(0, Math.min(100, a * V + b * P + c * E + d * C));
+    const R_raw = a * V + b * P + c * E + d * C;
+    const R = Math.max(0, Math.min(100, R_raw));
     const band = R < 40 ? "cold" : R < 70 ? "warm" : "hot";
     const T = Number(metrics.T) || 1;
     const wK = metrics.w_k || {};
@@ -1076,7 +1077,7 @@
       .slice(0, 2)
       .join(",");
     return {
-      V, P, E, C, R, band, top_types,
+      V, P, E, C, R, R_raw, band, top_types,
       vehicle_count: metrics.vehicle_count,
       window: ($("risk_window").value || "").trim() || "this_clip",
     };
@@ -1093,6 +1094,11 @@
     $("riskHero").hidden = false;
     $("riskBreakdown").hidden = false;
     $("riskR").textContent = fmtRisk(row.R);
+    const rawEl = $("riskRaw");
+    if (rawEl) {
+      const raw = row.R_raw;
+      rawEl.textContent = raw == null ? "—" : fmtRisk(raw);
+    }
     const band = row.band || "—";
     const tag = $("riskBand");
     tag.textContent = band;
@@ -1209,9 +1215,13 @@
       state.record.stage = "risk";
       unlockLaterSteps(state.record);
     }
-    renderRiskResult(payload, "Saved.");
-    setStatus("Risk saved");
-    log(`Risk saved R=${fmtRisk(payload.R)} band=${payload.band} window=${payload.window || body.window}`);
+    renderRiskResult(payload, payload.db_warning ? "Saved locally (database write failed)." : "Saved.");
+    setStatus(payload.db_warning ? "Risk saved locally" : "Risk saved");
+    if (payload.db_warning) {
+      log(`Risk saved locally. Database write failed: ${payload.db_warning}`);
+    } else {
+      log(`Risk saved R=${fmtRisk(payload.R)} band=${payload.band} window=${payload.window || body.window}`);
+    }
   }
 
   function linsolve(A, b) {
